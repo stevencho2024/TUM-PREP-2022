@@ -9,3 +9,5 @@ The most important client scripts are simpleCar_MPC2.py and simpleCar_MPC_TVs.py
     4. logs: folder for log files of the clientscripts
     
     
+link to docs:
+https://bitbucket.org/rawlings-group/mpc-tools-casadi/src/master/doc/cheatsheet.tex
