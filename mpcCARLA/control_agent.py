@@ -7,6 +7,7 @@
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
 """ This module contains a model predictive controller to perform low-level waypoint following. """
+#performs MPC step calc, polynomial fit, and condition creation/application
 import glob
 import os
 import sys
@@ -45,7 +46,7 @@ class VehicleCurvMPC(object):
     """
 
     MIN_DISTANCE_PERCENTAGE = 0.9
-
+    #define all paramters in the class Vehicle Cruve MPC
     def __init__(self, vehicle, tvs=dict(), opt_dict=None):
         self._vehicle = vehicle
         self._map = self._vehicle.get_world().get_map()
@@ -78,7 +79,7 @@ class VehicleCurvMPC(object):
 
         # define size of states, inputs, etc., for Casadi
         self.Nx = 12 # Number of states
-        self.Nu = 2  # Number of Inputs
+        self.Nu = 2  # Number of Inputs (steer and acceleration)
         self.Nt = 10  # Number of Steps
 
         # initializing controller
@@ -121,7 +122,7 @@ class VehicleCurvMPC(object):
                                                                 factor=5)  # factor 11 --> prediction horizon 10 steps
 
         self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
-        self.desired_lane_id = self._current_waypoint.lane_id
+        self.desired_lane_id = self._current_waypoint.lane_id #stores initial lane
 
         # fill waypoint trajectory queue
         self._waypoints_queue = compute_next_waypoints(self._current_waypoint, d=self._sampling_radius, k=200)
@@ -166,7 +167,7 @@ class VehicleCurvMPC(object):
 
 
 
-    def run_step(self,timestep:int,  debug=True, log=False):
+    def run_step(self,timestep:int,  debug=True, log=False, print=True):
         """
         Execute one step of classic mpc controller which follow the waypoints trajectory.
 
@@ -193,10 +194,12 @@ class VehicleCurvMPC(object):
                 self._sampling_radius = 3
 
 
+
+            ###compute waypoints will have to be modified into using sensor data######
             # Getting future waypoints
             self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
-            self._next_wp_queue = compute_next_waypoints(self._current_waypoint, d=self._sampling_radius, k=15, stay_on_lane=True, active_lane_change=self.changing_lane)
-            # Getting waypoint history --> history somehow starts at last wp of future wp
+            self._next_wp_queue = compute_next_waypoints(self._current_waypoint, d=self._sampling_radius, k=15, stay_on_lane=True, active_lane_change=self.changing_lane) #returns list
+            # Getting waypoint history --> history somehow starts at last wp of future wp (previous waypoints)
             self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
             self._previous_wp_queue = compute_previous_waypoints(self._current_waypoint, d=self._sampling_radius, k=5, stay_on_lane=True, active_lane_change=self.changing_lane)
 
@@ -218,7 +221,7 @@ class VehicleCurvMPC(object):
             # calculation of kappa --> only needed if nmpc problem is solved.
             self.kappa_log = dict()
             self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
-            self.curv_args, self.kappa_log = self.calculate_curvature_func_args(log=True)
+            self.curv_args, self.kappa_log = self.calculate_curvature_func_args(log=True) #gets the fitted poly
             self.curv_x0 = func_kappa(0, self.curv_args)
 
             # input for MPC controller --> wp_current, wp_next, kappa
@@ -254,8 +257,8 @@ class VehicleCurvMPC(object):
 
                 # apply manual control
                 control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps,
-                                                                                          self._target_speed,
-                                                                                          solve_nmpc=False, manual=True, log=log)
+                                                                                          self._target_speed, 
+                                                                                          solve_nmpc=False, manual=True, log=log, debug=False) ####
                 self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
                                  'Eta': state[5],
                                  'Theta': state[6],
@@ -273,7 +276,7 @@ class VehicleCurvMPC(object):
                 control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps,
                                                                                           self._target_speed,
                                                                                           solve_nmpc=False,
-                                                                                          manual=True, log=log)
+                                                                                          manual=True, log=log, debug=False) ###
                 self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3],
                                  'Xi': state[4],
                                  'Eta': state[5],
@@ -284,7 +287,7 @@ class VehicleCurvMPC(object):
 
             else:
                 if timestep % 6 == 0:
-                    status , control, state, u, u_log, x_log, _ = self._vehicle_controller.mpc_control(target_wps2, self._target_speed, solve_nmpc=True, log=log)
+                    status , control, state, u, u_log, x_log, _ = self._vehicle_controller.mpc_control(target_wps2, self._target_speed, solve_nmpc=True, log=log, debug=False)###
                     # Updating logging information of the logger
                     self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
                                      'Eta': state[5],
@@ -293,7 +296,7 @@ class VehicleCurvMPC(object):
                                      'pred_control': [u_log], 'computation_time': time.time() - start_time, "kappa": self.curv_x0, "curvature_radius": 1/self.curv_x0}
 
                 else:
-                    control, state, prediction, u = self._vehicle_controller.mpc_control(target_wps,self._target_speed, solve_nmpc=False, log=log)
+                    control, state, prediction, u = self._vehicle_controller.mpc_control(target_wps,self._target_speed, solve_nmpc=False, log=log, debug=False)###
                     # Updating logging information of the logger
                     self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
                                      'Eta': state[5],
@@ -304,7 +307,7 @@ class VehicleCurvMPC(object):
                 self.data_log["velocity_error"] = state[3] - self._target_speed / 3.6
                 # self.data_log['kappa_state'] = state[9]
                 self.data_log['target_velocity'] = self._target_speed
-        else:
+        else: ####MPC control will also have to modified to sensor data
             if timestep % 6 == 0:
                 control = self._vehicle_controller.mpc_control(target_wps, self._target_speed,solve_nmpc=True, log=False)
             else:
@@ -312,11 +315,12 @@ class VehicleCurvMPC(object):
                                                                          solve_nmpc=False, log=log)
 
         # Print State information on TVs in realtion to EV
-        for tv_name, tv in self._tvs.items():
-            print(colored(tv_name+' current state:'+
-                          str(xy2frenet_wp(tv, self._map, self._waypoint_buffer, self._sampling_radius)) +
-                          '   euclidean distance: '+
-                          str(distance_vehicle(self.wp1, tv.get_transform())), 'white', 'on_red'))
+        if print:
+            for tv_name, tv in self._tvs.items():
+                print(colored(tv_name+' current state:'+
+                            str(xy2frenet_wp(tv, self._map, self._waypoint_buffer, self._sampling_radius)) +
+                            '   euclidean distance: '+
+                            str(distance_vehicle(self.wp1, tv.get_transform())), 'white', 'on_red'))
 
         if debug and timestep % 6 == 0:
             prediction_location = []
@@ -341,7 +345,7 @@ class VehicleCurvMPC(object):
         """
         Function to calculate the curvature function arguments.
         This is done by fitting all reference waypoint from the waypoint buffer to 3th-polynomial function.
-        :return: [p0, p1, p2, p3] of the 3th polynomial.
+        :return: [p0, p1, p2, p3] of the 3th polynomial. Also returns Kappa (vehicle related data)
         """
         kappa_log = dict()
         # Current waypoint as reference point to center all waypoints
@@ -385,12 +389,12 @@ class VehicleCurvMPC(object):
         return p_opt, kappa_log
 
 
-    def visualizeKappa2Carla(self, p_opt):
+    def visualizeKappa2Carla(self, p_opt): #drawing the lines one sees in simulation
 
         # Rotation matrix to align current waypoint to x-axis
         angle_wp = get_wp_angle(self.wp1, self.wp2)
         R_inv = np.linalg.inv(rotmat(angle_wp))
-        R_inv = inv_rotmat(angle_wp)
+        R_inv = inv_rotmat(angle_wp) #redundant?
 
         # Current waypoint as reference point to center all waypoints
         ref_point = np.array([-1 * self.wp1.transform.location.x, self.wp1.transform.location.y])
@@ -464,21 +468,92 @@ class VehicleCurvMPC(object):
         min_dist = 0.5 * get_speed(self._vehicle)
         Delta = 0.2
 
-        if self._tvs:
 
+        # cond_array = [] #to feed into lcon later
+        # closest_front_vehicle = None
+        
+        if self._tvs: ##remember this guy!
+        # ############################################################################# Time to make a general case for TVs
+        #     for TV in self._tvs: #change this for sensors implementation!
+        #         tv_state = xy2frenet_wp(self._tvs[TV], self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
+        #         ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+
+        #         ###########
+        #         x = np.zeros(15) #dummy temporary instantiators 
+        #         s = np.zeros(15) #dummy temporary instantiators 
+        #         case210 = - x[5] + (0.5 * tv_state[5]) -s[1]
+        #         case220 = x[4] - (tv_state[4] + x[11] * Delta * tv_state[3] - min_dist - car_dim['length']) - s[0]
+        #         case21121 = - x[5] + ((2.5* car_dim['width'] + tv_state[5] - ev_state[5]) / (tv_state[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1]
+        #         ###########
+
+        #         # Getting nearest waypoint to the TVs (with wp the current lane number of the TV can be easily evaluated)
+        #         wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
+        #                                    lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+        #         wp_tv = self._map.get_waypoint(self._tvs[TV].get_location(), project_to_road=True,
+        #                                    lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+
+                
+                
+        #         if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= 30: #if within a certain radius of the ev
+        #             if abs(wp_ev.lane_id - wp-tv.lane_id) == 1 #check if the tv is on the adjacent lanes 
+        #                 #apply case 220 but only car on the right on the tv
+        #                 if case220 not in cond_array:
+        #                     cond_array.append(case220)
+
+
+
+        #             elif abs(wp_ev.lane_id - wp-tv.lane_id) == 0: #tv is in same lane
+        #                 #apply case 210 to the tv
+        #                 if case210 not in cond_array:
+        #                     cond_array.append(case210)
+
+        #                 if not closest_front_vehicle | closest_front_vehicle
+        #                 #check if not defined or if this tv is closer than previously tv that set this bound
+        #                     closest_front_vehicle = tv_state
+
+        #                 if tv_state[5] > 20 & :
+        #                     #if tvs arent in the way lane change When the 
+
+        #                 #figure out when to add in 
+
+            
+
+
+
+
+        #     lcon = lambda x, s: mpc.vcat(cond_array)
+            
+            ###########################################
+            # if case == 210:
+            #      dim_lin_cond = 1
+
+            #      # upper bound function --> equals TV dimension + 2m safety area around vehicle
+            #      ub_cond['xi'] = lambda t: mpc.vcat([tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
+            #      # soft constraint function to ensure the desired min distance --> x[11] is a counter state for the discrete step of the optimization problem
+            #      lcon = lambda x, s: mpc.vcat([x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s]) #smaller box?
+
+            # if case == 220:
+            #      dim_lin_cond = 2
+            #      ub_cond['xi'] = lambda t: mpc.vcat([  tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
+            #      lb_cond['eta'] = lambda t: mpc.vcat([tv2_state[5] - np.sign(tv2_state[1]) * (car_dim['width'] + 1)])
+            #      lcon = lambda x, s: mpc.vcat([  x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s[0],
+            #                                      - x[5] + (0.5 * tv2_state[5]) -s[1]])
+
+
+            ############################################################################# original
             # Getting frenet state representation for TV1, TV2 and EV
             tv1_state = xy2frenet_wp(self._tvs['TV1'], self._map, self._waypoint_buffer, self._sampling_radius)
             tv2_state = xy2frenet_wp(self._tvs['TV2'], self._map, self._waypoint_buffer, self._sampling_radius)
             ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
 
 
-            # Getting nearest waypoint to the TVs (with wp the current lane number of the TV can be easily evaluated)
+             # Getting nearest waypoint to the TVs (with wp the current lane number of the TV can be easily evaluated)
             wp_tv1 = self._map.get_waypoint(self._tvs['TV1'].get_location(), project_to_road=True,
-                                           lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+                                            lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
             wp_tv2 = self._map.get_waypoint(self._tvs['TV2'].get_location(), project_to_road=True,
-                                           lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+                                            lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
 
-
+            ###################################################################
             # Init upper and lower bounds for frenet state space
             ub_cond = dict()
             lb_cond = dict()
@@ -488,20 +563,20 @@ class VehicleCurvMPC(object):
             take_over_counter = 0
 
 
-            if case == 210:
-                dim_lin_cond = 1
+            # if case == 210:
+            #      dim_lin_cond = 1
 
-                # upper bound function --> equals TV dimension + 2m safety area around vehicle
-                ub_cond['xi'] = lambda t: mpc.vcat([tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
-                # soft constraint function to ensure the desired min distance --> x[11] is a counter state for the discrete step of the optimization problem
-                lcon = lambda x, s: mpc.vcat([x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s])
+            #      # upper bound function --> equals TV dimension + 2m safety area around vehicle
+            #      ub_cond['xi'] = lambda t: mpc.vcat([tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
+            #      # soft constraint function to ensure the desired min distance --> x[11] is a counter state for the discrete step of the optimization problem
+            #      lcon = lambda x, s: mpc.vcat([x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s]) #smaller box?
 
-            if case == 220:
-                dim_lin_cond = 2
-                ub_cond['xi'] = lambda t: mpc.vcat([  tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
-                lb_cond['eta'] = lambda t: mpc.vcat([tv2_state[5] - np.sign(tv2_state[1]) * (car_dim['width'] + 1)])
-                lcon = lambda x, s: mpc.vcat([  x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s[0],
-                                                - x[5] + (0.5 * tv2_state[5]) -s[1]])
+            # if case == 220:
+            #      dim_lin_cond = 2
+            #      ub_cond['xi'] = lambda t: mpc.vcat([  tv1_state[4] + t * Delta * tv1_state[3] - car_dim['length'] - 2])
+            #      lb_cond['eta'] = lambda t: mpc.vcat([tv2_state[5] - np.sign(tv2_state[1]) * (car_dim['width'] + 1)])
+            #      lcon = lambda x, s: mpc.vcat([  x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s[0],
+            #                                      - x[5] + (0.5 * tv2_state[5]) -s[1]])
 
             if case == 21121:
                 dim_lin_cond = 2
@@ -509,11 +584,13 @@ class VehicleCurvMPC(object):
                 #lb_cond['eta'] = lambda t: mpc.vcat([tv2_state[5] - np.sign(tv2_state[5]) * (car_dim['width'] + 1)])
 
                 # soft constraint function to ensure the overtaking by a linear constraint --> x[11] is a counter state for the discrete step of the optimization problem, makes constraint time varying
+                
                 lcon = lambda x, s: mpc.vcat([  #x[4] - (tv1_state[4] + x[11] * Delta * tv1_state[3] - min_dist - car_dim['length']) - s[0],
-                                                - x[5] + (0.75 * tv2_state[5]) -s[0],  # eta constraint for TV2
-                                                - x[5] + ((2.5* car_dim['width'] + tv1_state[5] - ev_state[5]) / (tv1_state[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1] # overtaking constraint for TV1
-                                                ])
+                                                 - x[5] + (0.75 * tv2_state[5]) -s[0],  # eta constraint for TV2
+                                                 - x[5] + ((2.5* car_dim['width'] + tv1_state[5] - ev_state[5]) / (tv1_state[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1] # overtaking constraint for TV1
+                                                 ])
 
+                                                ####
                 # if EV is not in the same lane as TV1 anymore, reinit constraint without overtaking constraint
                 if abs(wp_tv1.lane_id) > abs(self.wp1.lane_id):
                     take_over_counter += 1
@@ -525,7 +602,7 @@ class VehicleCurvMPC(object):
                             #- x[5] + (tv1_state[5] - np.sign(tv1_state[5]) * car_dim['width']) - s[1],   # at lane change EV does not fullfill condition, leading to a rapid lane change
                             s[1]
                         ])
-
+            
             # Dict with all the conditions (state space + time-varying)
             cond = {'x_bounds': ub_cond, 'linear_cond': lcon, 'x_bounds_low': lb_cond, 'dim_lin_cond': dim_lin_cond}
 
