@@ -468,60 +468,92 @@ class VehicleCurvMPC(object):
         min_dist = 0.5 * get_speed(self._vehicle)
         Delta = 0.2
 
-
-        # cond_array = [] #to feed into lcon later
-        # closest_front_vehicle = None
-        
+        #cond_lane_dict = {}
+        cond_array = [] #to feed into lcon later 
+        car_ahead = [] #initialize as no car in front
+        plus1_lane = []
+        minus1_lane = []
+        conditions_remove = []
         if self._tvs: ##remember this guy!
-        # ############################################################################# Time to make a general case for TVs
-        #     for TV in self._tvs: #change this for sensors implementation!
-        #         tv_state = xy2frenet_wp(self._tvs[TV], self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
-        #         ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
-
-        #         ###########
-        #         x = np.zeros(15) #dummy temporary instantiators 
-        #         s = np.zeros(15) #dummy temporary instantiators 
-        #         case210 = - x[5] + (0.5 * tv_state[5]) -s[1]
-        #         case220 = x[4] - (tv_state[4] + x[11] * Delta * tv_state[3] - min_dist - car_dim['length']) - s[0]
-        #         case21121 = - x[5] + ((2.5* car_dim['width'] + tv_state[5] - ev_state[5]) / (tv_state[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1]
-        #         ###########
-
-        #         # Getting nearest waypoint to the TVs (with wp the current lane number of the TV can be easily evaluated)
-        #         wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
-        #                                    lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
-        #         wp_tv = self._map.get_waypoint(self._tvs[TV].get_location(), project_to_road=True,
-        #                                    lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
-
-                
-                
-        #         if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= 30: #if within a certain radius of the ev
-        #             if abs(wp_ev.lane_id - wp-tv.lane_id) == 1 #check if the tv is on the adjacent lanes 
-        #                 #apply case 220 but only car on the right on the tv
-        #                 if case220 not in cond_array:
-        #                     cond_array.append(case220)
-
-
-
-        #             elif abs(wp_ev.lane_id - wp-tv.lane_id) == 0: #tv is in same lane
-        #                 #apply case 210 to the tv
-        #                 if case210 not in cond_array:
-        #                     cond_array.append(case210)
-
-        #                 if not closest_front_vehicle | closest_front_vehicle
-        #                 #check if not defined or if this tv is closer than previously tv that set this bound
-        #                     closest_front_vehicle = tv_state
-
-        #                 if tv_state[5] > 20 & :
-        #                     #if tvs arent in the way lane change When the 
-
-        #                 #figure out when to add in 
-
+        ############################################################################# Time to make a general case for TVs
+            ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+            wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
+                                           lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+            #free_lane4change = [wp_ev.lane_id + 1, wp_ev.lane_id - 1] #for knowing which lane is free to use for overtaking 
+            right_lane_free = True
+            left_lane_free = True
+            ahead_free = True
+            closest_front_vehicle = None
             
+            for TV in self._tvs: #change this for sensors implementation!
+                tv_state = xy2frenet_wp(self._tvs[TV], self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
+                #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+
+                ###########
+                x = np.zeros(15) #dummy temporary instantiators 
+                s = np.zeros(15) #dummy temporary instantiators 
+                case210 = - x[5] + (0.5 * tv_state[5]) -s[1]
+                case220 = x[4] - (tv_state[4] + x[11] * Delta * tv_state[3] - min_dist - car_dim['length']) - s[0]
+                #case21121 = - x[5] + ((2.5* car_dim['width'] + tv_state[5] - ev_state[5]) / (tv_state[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1]
+                ###########
+
+                # Getting nearest waypoint to the TVs (with wp the current lane number of the TV can be easily evaluated)
+                #wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
+                                           #lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+                wp_tv = self._map.get_waypoint(self._tvs[TV].get_location(), project_to_road=True,
+                                           lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+
+                
+                
+                if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= 5*car_dim['length']: #if within a certain radius of the ev
+                    lane_diff = wp_ev.lane_id - wp-tv.lane_id
+                    if abs(lane_diff) == 1 #check if the tv is on the adjacent lanes  ###I NEED TO CHANGE THIS
+                        #apply case 220 but only car on the right on the tv
+                        if case220 not in cond_array:
+                            cond_array.append(case220)
+                        
+                        if lane_diff == 1:
+                            minus1_lane.append(case220)
+                            #check if either lanes have tvs that are just behind the ev (for lane changing)
+                            if tv_state[5] >= -1.5*car_dim['length']:
+                                left_lane_free = False
+                        elif lane_diff == -1:
+                            plus1_lane.append(case220)
+                            #check if either lanes have tvs that are just behind the ev (for lane changing)
+                            if tv_state[5] >= -1.5*car_dim['length']:
+                                right_lane_free = False
 
 
 
+                    elif abs(wp_ev.lane_id - wp-tv.lane_id) == 0: #tv is in same lane
+                        #apply case 210 to the tv
+                        if case210 not in cond_array:
+                            cond_array.append(case210)
+                        
+                        if tv_state[5] > 0:
+                            car_ahead.append(case210) # 
 
-        #     lcon = lambda x, s: mpc.vcat(cond_array)
+                        if not closest_front_vehicle | closest_front_vehicle[5] > tv_state[5]:
+                        #check if not defined or if this tv is closer than previously tv that set this bound
+                            closest_front_vehicle = tv_state
+            
+                
+            #figure out if the lanes exist in the array
+            if car_ahead == True:
+                case21121 = - x[5] + ((2.5* car_dim['width'] + closest_front_vehicle[5] - ev_state[5]) / (closest_front_vehicle[4] - 2 * car_dim['length']) * x[4] + (ev_state[5] - 1 * car_dim['width'])) - s[1]
+
+                if right_lane_free == True or left_lane_free == True: #either lanes free to use to overtake?
+                    if right_lane_free == True:
+                        cond_array = [e for e in cond_array if e not in minus1_lane]
+                    if left_lane_free == True:
+                       #the problem is being able to tell which array of lane cond to remove
+                        cond_array = [e for e in cond_array if e not in plus1_lane]
+                    cond_array = [e for e in cond_array if e not in car_ahead]
+                    cond_array.append(case21121)
+
+
+
+            lcon = lambda x, s: mpc.vcat(cond_array)
             
             ###########################################
             # if case == 210:
