@@ -271,8 +271,6 @@ class MPCController:
         x = [x0]
         for k in range(N):
             x.append(self.dynamics(x[-1],U0[k*m:(k+1)*m])) # state sequence
-            x[-2] = x[-2][3:7] #adjust the length of each array to 4 to match cost matrix dim
-        x[-1] = x[-1][3:7] #v, xi, eta, theta
         u_last = u_1    # state applied during previous step
         cost = 0 # initialize overall cost with scalar value 0
         for k in range(N):
@@ -285,30 +283,28 @@ class MPCController:
         return cost # return scalar value representing overall cost associated with input sequence U
 
 
-    def cstr(self, U, N, qx, qy, qt):
+    def cstrf(self, U, m, N, x0s, kap, qt):
         #U array of inputs
         #N: number of time steps
-        #x0: initial state
-        #xref: 
-
+        #qt: 4D array containig the inequality constraints [tv][coeff order][time step][variable]
+        #0,1,2,3 = 3,4,5,6 state index conversion
         U0 = U
-        x = [x0]
+        x = [x0s]
         for k in range(N):
             x.append(self.dynamics(x[-1],U0[k*m:(k+1)*m])) # state sequence
-            x[-2] = x[-2][3:7] #adjust the length of each array to 4 to match cost matrix dim
-        x[-1] = x[-1][3:7] #v, xi, eta, theta
         cineq = []
-        for k in range(N):
-            cineq.append(float(qt[0]*x[k][11]+qt[1]*x[k][5]+qt[2]*x[k][4]+qt[3]))
-        print("boutta return cost")
-        return cost # return scalar value representing overall cost associated with input sequence U
-                            #
+
+        for TV in range(len(qt)):
+            for k in range(N): #k is for time step
+                cineq.append(float(qt[TV][0][k]*kap + qt[TV][1][k]*x[k][2] + qt[TV][2][k]*x[k][1] + qt[TV][3][k])) #<=0
+        print("boutta return cstr ineq")
+        
+        return cineq # return array of ineq constr
 
     # Define Model Predictive control with a linearized Kinematic Model CAN completely scrap this bedcause it isnt used in the child of this class
-    def mpc_control(self, waypoint, function, x0, target_speed=None, solve_nmpc=True, manual=False, last_u=None, log=False, debug=True): #REAL REAL ONE BEING USED || Parent class is CURVMPC
+    def mpc_control(self, waypoint, getqs, x0, target_speed=None, solve_nmpc=True, manual=False, last_u=None, log=False, debug=True): #REAL REAL ONE BEING USED || Parent class is CURVMPC
         """
         Execute one step of control to reach given waypoint as closely as possible with a given target speed.
-
         :param target_speed: desired vehicle speed
         :param waypoint: target location encoded as a waypoint
         :return: distance (in meters) to the waypoint
@@ -347,8 +343,8 @@ class MPCController:
         S = self._S
         u_1 = self._last_control
             
-        qx, qt, qy = getqs(...)
-        cstr = [{'type': 'ineq', 'fun': lambda U: cstrf(U, N, qx, qy, qt)}]
+        qt = getqs(...)
+        cstr = [{'type': 'ineq', 'fun': lambda U: self.cstrf(U, N, m, x0s, kap, qt)}]
         # U0 must be the guess of the input sequence (m*N x 1 array)
         # x0 must be a 4 dim array with the initial condition of the EV (only the four features we are concerned with)
         
@@ -362,24 +358,26 @@ class MPCController:
         
 
         #U0
-        if not self.guess:
+        if not self.guess: ##################fix
             U0 = np.zeros(N * m)
         else:
             U0 = self.guess
             print("used self guess")
+            
         #print("array of u0", U0)
         #pdb.set_trace()
         print('what the hell')
-        x0s = # extract the 4 features from x0
+        x0s = self.state[3:7]
+        kap = self.state[9]
 
-        res = opt.minimize(self.costf, U0, args=(N, x0s, xref, u_1, Q, R, S, m, kr), ###########
+        res = opt.minimize(self.costf, U0, args=(N, x0s, xref, u_1, Q, R, S, m), ###########
                     method="SLSQP", constraints=cstr)
         pdb.set_trace()
         u = res.x.reshape(-1, 1) #sequence of U
-        cost0 = costf(u, N, x0, xref, u_1, Q, R, S, m)
-        ua = u
-        ua[0][0] = 5
-        costa = costf(ua, N, x0, xref, u_1, Q, R, S, m)
+        #cost0 = costf(u, N, x0, xref, u_1, Q, R, S, m)
+        #ua = u
+        #ua[0][0] = 5
+        #costa = costf(ua, N, x0, xref, u_1, Q, R, S, m)
         pdb.set_trace()
 
         # Loads predicted input and states into variables which can be given out with print
@@ -410,25 +408,18 @@ class MPCController:
 
     def getter(self):
         return self._Nu
-    def dynamics(self, x, u, kr, T, ...):
+    def dynamics(self, x, u, kap):
         # return next state starting from current state x if input u is applied
         # check what args_mpc_functions 'sys' (in the student's code) does, probably is what we want here
         # if you need other parameters, add them! For example the current curvature or so...
         # 10 timesteps ahead
         #pdb.set_trace()
+        #0,1,2,3 = 3,4,5,6 for index
         outputs = lambda x, u: np.array(
-            [0,#self._dt * (x[3] * np.cos(x[2] + self.alpha(u))) + x[0],  # X
-            0,#self._dt * (x[3] * np.sin(x[2] + self.alpha(u))) + x[1],  # Y
-            0,#self._dt * ((x[3] / self._lr) * np.sin(self.alpha(u))) + x[2],  # psi
-            float(self._dt * (u[0]) + x[3]),  # velocity
-            float(self._dt * self.dxi(x, u) + x[4]),  # xi
-            float(self._dt * (x[3] * np.sin(x[6] + self.alpha(u))) + x[5]),  # eta
-            float(self._dt * ((x[3] / self._lr) * np.sin(self.alpha(u)) - x[9] * self.dxi(x, u)) + x[6]),  # theta
-            0,#u[0],  # u0
-            0,#u[1],  # u1
-            float(wp.func_kappa(x[4], self._kr)), # kappa
-            0,#(x[10] + self.velocity_error(x) * self._dt),   # velocity error
-            float(x[11] + 1)
+            [float(self._dt * (u[0]) + x[0]),  # velocity
+            float(self._dt * self.dxi(x, u) + x[1]),  # xi
+            float(self._dt * (x[0] * np.sin(x[3] + self.alpha(u))) + x[2]),  # eta
+            float(self._dt * ((x[0] / self._lr) * np.sin(self.alpha(u)) - kap * self.dxi(x, u)) + x[3]),  # theta
             ])
         #print("kr", self._kr)
 
