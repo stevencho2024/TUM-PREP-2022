@@ -251,7 +251,7 @@ class VehicleCurvMPC(object):
                 print(manual_control)
 
                 # apply manual control
-                control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps, self.cstrf, self._vehicle_controller.state,
+                control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps, self.getqs, self._vehicle_controller.state,
                                                                                           self._target_speed, 
                                                                                           solve_nmpc=False, manual=True, log=log, debug=False) ####
                 self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
@@ -268,7 +268,7 @@ class VehicleCurvMPC(object):
                 target_wps.append(manual_control)
 
                 # apply manual control
-                control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps, self.cstrf, self._vehicle_controller.state,
+                control, state, u, x_log, u_log, _ = self._vehicle_controller.mpc_control(target_wps, self.getqs, self._vehicle_controller.state,
                                                                                           self._target_speed,
                                                                                           solve_nmpc=False,
                                                                                           manual=True, log=log, debug=False) ###
@@ -282,7 +282,7 @@ class VehicleCurvMPC(object):
 
             else:
                 if timestep % 6 == 0:
-                    status , control, state, u, u_log, x_log, _ = self._vehicle_controller.mpc_control(target_wps, self.cstrf, self._vehicle_controller.state, target_speed = self._target_speed, solve_nmpc= True, log=log, debug=False)###
+                    status , control, state, u, u_log, x_log, _ = self._vehicle_controller.mpc_control(target_wps, self.getqs, self._vehicle_controller.state, target_speed = self._target_speed, solve_nmpc= True, log=log, debug=False)###
                     # Updating logging information of the logger
                     self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
                                      'Eta': state[5],
@@ -291,7 +291,7 @@ class VehicleCurvMPC(object):
                                      'pred_control': [u_log], 'computation_time': time.time() - start_time, "kappa": self.curv_x0, "curvature_radius": 1/self.curv_x0}
 
                 else:
-                    control, state, prediction, u = self._vehicle_controller.mpc_control(target_wps, self.cstrf, self._vehicle_controller.state, self._target_speed, solve_nmpc=False, log=log, debug=False)###
+                    control, state, prediction, u = self._vehicle_controller.mpc_control(target_wps, self.getqs, self._vehicle_controller.state, self._target_speed, solve_nmpc=False, log=log, debug=False)###
                     # Updating logging information of the logger
                     self.data_log = {'X': state[0], 'Y': state[1], 'PSI': state[2], 'Velocity': state[3], 'Xi': state[4],
                                      'Eta': state[5],
@@ -308,9 +308,9 @@ class VehicleCurvMPC(object):
         ####MPC control will also have to modified to sensor data
         else:
             if timestep % 6 == 0:
-                control = self._vehicle_controller.mpc_control(target_wps, self.cstrf, self._vehicle_controller.state, self._target_speed,solve_nmpc=True, log=False)
+                control = self._vehicle_controller.mpc_control(target_wps, self.getqs, self._vehicle_controller.state, self._target_speed,solve_nmpc=True, log=False)
             else:
-                control,_,  _, _ = self._vehicle_controller.mpc_control(target_wps,self.cstrf, self._vehicle_controller.state, self._target_speed,
+                control,_,  _, _ = self._vehicle_controller.mpc_control(target_wps,self.getqs, self._vehicle_controller.state, self._target_speed,
                                                                             solve_nmpc=False, log=log)
 
         # Print State information on TVs in realtion to EV
@@ -458,10 +458,9 @@ class VehicleCurvMPC(object):
         self.Delta = 0.2
         self.max_surveilance_rad = 20 #20 meters due to xi's limit in determining xi values
 
-    def getqs(self, U, N):
+    def getqs(self, N):
         """
-        Returning constraints inequality function based on current scene.
-        :return: constraints function
+        Returning the coefficients used in the constraint inequalities 
         """
         
         #U (array): input sequence
@@ -479,8 +478,29 @@ class VehicleCurvMPC(object):
         #based on conditions add or remove constrains
        # print("U", U)
         #print("N", N)
+
+
         start_time = time.time()
-        x0 = self._vehicle_controller.state #already defined in the file
+        x0 = self._vehicle_controller.state[3:7] #already defined in the file
+        # #print( len(self._tvs), N, len(x0))
+        qt = np.zeros((len(self._tvs), N, len(x0)))
+        # #print("--- %s seconds ---" % (time.time() - start_time))
+        # return qt
+
+        ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+        for i in range(N):
+            qt[0][i][0] = 0 #eta
+            qt[0][i][1] = 1 #x[5]
+            qt[0][i][2] = 0 #x[4]
+            if i == 0:
+                qt[0][i][3] = -x0[2]
+            else:
+                qt[0][i][3] = -(0.2 + qt[0][i-1][1])
+
+        return qt
+
+        "I would propagate the "
+
         print("x0", x0)
         U0 = U
         print('U0', U0)
@@ -489,9 +509,8 @@ class VehicleCurvMPC(object):
         #print(m)
         for k in range(N):
             x.append(MPCController(self._vehicle).dynamics(x[-1],U0[k*m:(k+1)*m]))
-        cineq = []  # initialize list of constraints
-        qt = np.zeros((4,m,len(x0)))
-        return qt
+        #cineq = []  # initialize list of constraints
+        
         
         # vehicle size
         car_dim = {'width': 2, 'length': 6}
