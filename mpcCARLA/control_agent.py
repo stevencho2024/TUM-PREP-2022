@@ -443,20 +443,47 @@ class VehicleCurvMPC(object):
 
         draw_prediction_trajectory(self._vehicle.get_world(), ref_curve_location, color=[0, 255, 0], thickness=0.1) # Draw green line
 
+    def dynamics_TV(self, x, u, T):
+        #x: array, xi, eta, V_xi, V_eta
+        #u: array, accel, speed
+        
 
-    def cstrf_intit_(self):
-        x0 = self._vehicle_controller.state #already defined in the file
-        m = MPCController(self._vehicle).getter() #ultimate goal is integrate function dynamics
-        for k in range(N):
-            x.append(MPCController(self._vehicle).dynamics(x[-1],U0[k*m:(k+1)*m]))  ########## keep or take out?
+        A = [[1, T, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, T],
+            [0, 0, 0, 1] 
+            ]
 
-        # vehicle size
-        self.car_dim = {'width': 2, 'length': 6}
+        B = [[0.5*(T ** 2), 0],
+            [T, 0],
+            [0, 0.5*(T ** 2)],
+            [0, T]]
 
-        # Setting min distance to half of the current speed
-        self.min_dist = 0.25 * get_speed(self._vehicle) #OG 0.5
-        self.Delta = 0.2
-        self.max_surveilance_rad = 20 #20 meters due to xi's limit in determining xi values
+        a = np.array(A)
+        b = np.array(B)
+
+        first_term = np.matmul(a, x)
+        second_term = np.matmul(b, u)
+        
+        next_state = first_term + second_term
+
+        return next_state
+
+
+    def Us_TV (self, xk, xref):
+        #returns just next input 
+        #xk: array, xi, V_xi, eta, V_eta
+        #xref: 0, 0, tv_speed, 0
+        diff_array = []
+        if len(xk) == len(xref):
+            for i in range(len(xk)):
+                diff_array.append(xk[i] - xref[i]) #dxi, deta, dv_xi, dv_eta
+        else:
+            print("index size not matching")
+        K = np.array([[0, -0.55, 0, 0],[0, 0, -0.63, -1.15]]) #from the paper
+        u_next = np.matmul(K, diff_array)
+        return u_next # longitudinal acc, horizontal acc
+
 
     def getqs(self, N):
         """
@@ -480,200 +507,233 @@ class VehicleCurvMPC(object):
         #print("N", N)
 
 
-        start_time = time.time()
-        x0 = self._vehicle_controller.state[3:7] #already defined in the file
-        # #print( len(self._tvs), N, len(x0))
-        qt = np.zeros((len(self._tvs), N, len(x0)))
-        # #print("--- %s seconds ---" % (time.time() - start_time))
+        #start_time = time.time()
+
+        tv_state_dim = 4  
+
+
+        # qt = np.zeros((len(self._tvs), N, tv_state_dim))
+        # # ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+        # x0 = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] 
+        # for i in range(N):
+        #     qt[0][i][0] = 0 #eta
+        #     qt[0][i][1] = 1 #x[5]
+        #     qt[0][i][2] = 0 #x[4]
+        #     if i == 0:
+        #         qt[0][i][3] = -x0[2]
+        #         print("first eta:", qt[0][i][3])
+        #     else:
+        #         qt[0][i][3] = (-0.1 + qt[0][i-1][3]) #previous time step eta 
+        #         print("previous eta", qt[0][i][3])
+
         # return qt
 
-        ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
-        for i in range(N):
-            qt[0][i][0] = 0 #eta
-            qt[0][i][1] = 1 #x[5]
-            qt[0][i][2] = 0 #x[4]
-            if i == 0:
-                qt[0][i][3] = -x0[2]
-            else:
-                qt[0][i][3] = -(0.2 + qt[0][i-1][1])
-
-        return qt
-
-        "I would propagate the "
-
-        print("x0", x0)
-        U0 = U
-        print('U0', U0)
-        x = [x0]
-        m = MPCController(self._vehicle).getter() #ultimate goal is integrate function dynamics
-        #print(m)
-        for k in range(N):
-            x.append(MPCController(self._vehicle).dynamics(x[-1],U0[k*m:(k+1)*m]))
-        #cineq = []  # initialize list of constraints
         
+
+        qt_stay = np.zeros((len(self._tvs), N, tv_state_dim)) # initialize list of constraints
+        qt_change = np.zeros((len(self._tvs), N, tv_state_dim))
         
+        T = 0.2 #sampling time
         # vehicle size
         car_dim = {'width': 2, 'length': 6}
 
         # Setting min distance to half of the current speed
-        min_dist = 0.25 * get_speed(self._vehicle) #OG 0.5
+        min_dist = 0.1 * get_speed(self._vehicle) #OG 0.5
         Delta = 0.2
-
+        
         #cond_lane_dict = {}
         #cond_array = [] #to feed into lcon later 
-        car_ahead = [] #initialize as no car in front
-        plus1_lane = [] #holds indexes
-        minus1_lane = [] #holds indexes
+        car_ahead = None #initialize as no car in front
+        #plus1_lane = [] #holds indexes
+        #minus1_lane = [] #holds indexes
         current_tv_idx = 0 #for indexing to decide which cond to eliminate for passing
 
         max_surveilance_rad = 20 #20 meters due to xi's limit in determining xi values
 
-        if self._tvs: ##remember this guy!
-        ############################################################################# Time to make a general case for TVs scipy
-            #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+        if self._tvs: ##remember this guy!        
             wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
                                         lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+            ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
             #free_lane4change = [wp_ev.lane_id + 1, wp_ev.lane_id - 1] #for knowing which lane is free to use for overtaking 
             right_lane_free = True
             left_lane_free = True
             closest_front_vehicle = None
 
+            
             for TV in self._tvs.values(): #change this for sensors implementation!
-                tv_state = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
+                x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
+
+                print("current car", current_tv_idx)
+                x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
+
+                tv_states = [x0s] #subarray: xi, V_xi, eta, V_eta (TV FORM) SEQUENCE
+                for k in range(N):
+                    TV_ref = [0, x0[3], 0, 0] ####make dynamic
+                    if k == 0:
+                        tv_states.append(self.dynamics_TV(tv_states[-1], [0,0], T)) #initial control inputs
+                    else:
+                        tv_states.append(self.dynamics_TV(tv_states[-1], self.Us_TV(tv_states[-2], TV_ref), T)) 
+
+                #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
                 wp_tv = self._map.get_waypoint(TV.get_location(), project_to_road=True,
                                         lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
-                # qx = np.array([0, 1, 0, -0.5 * tv_state[5]])  #car on left case220
-                # qy = np.array([0, -1, 0, 0.5*tv_state[5]]) #car on right case225
+
+                
+                #signs flipped because switch from casadi to scipy
                 # qz = np.array([-Delta * closest_front_vehicle[3], 0, 1,(-closest_front_vehicle[4] + min_dist + car_dim['length'])]) #lane change case21121
-                # qt = np.array([-Delta * tv_state[3], 0, 1,- tv_state[4] + min_dist + car_dim['length']]) #car in front case210
-                qx = [0,0,0,0]
-                qy = [0,0,0,0]
-                qz = [0,0,0,0]
-                qt = [0,0,0,0]
-                if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= max_surveilance_rad or tv_state[4] < 30: #if within a certain radius of the ev HARD CODED FOR NOW ########### bc max range on eta calc
+
+                if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= max_surveilance_rad or x0[1] < 30: #if within a certain radius of the ev HARD CODED FOR NOW ########### bc max range on eta calc
                     lane_diff = wp_ev.lane_id - wp_tv.lane_id
                     print("distance:", euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location))
                     #### because there is no lane zero
                     if wp_ev.lane_id == 1 & wp_tv.lane_id == -1:
-                        #if case225 not in cond_array:
                         for k in range(N):
-                            cineq.append(float(qx[0]*x[k][11]+qx[1]*x[k][5]+qx[2]*x[k][4]+qx[3])) #case 225
+                            qt_stay[current_tv_idx][k][0] = 0
+                            qt_stay[current_tv_idx][k][1] = -1
+                            qt_stay[current_tv_idx][k][2] = 0
+                            qt_stay[current_tv_idx][k][3] = 0.5*tv_states[k][2] #eta
+                             #case 225
                             
                         print("case 225 added")
-                        minus1_lane.append(current_tv_idx)
+                        #minus1_lane.append(current_tv_idx)
 
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
-                        if tv_state[4] >= -1.5*car_dim['length']:
+                        if x0[1] >= -2*car_dim['length']:
                             left_lane_free = False
 
                         
                         
                     elif wp_ev.lane_id == -1 & wp_tv.lane_id == 1:
                         for k in range(N):
-                            cineq.append(float(qy[0]*x[k][11]+qy[1]*x[k][5]+qy[2]*x[k][4]+qy[3])) #case 220
+                            qt_stay[current_tv_idx][k][0] = 0
+                            qt_stay[current_tv_idx][k][1] = 1
+                            qt_stay[current_tv_idx][k][2] = 0
+                            qt_stay[current_tv_idx][k][3] = -0.5*tv_states[k][2]#case 220
                         print("case 220 added")
 
-                        plus1_lane.append(current_tv_idx)
-                            #check if either lanes have tvs that are just behind the ev (for lane changing)
-                        if tv_state[4] >= -1.5*car_dim['length']:
+                        #plus1_lane.append(current_tv_idx)
+                        #check if either lanes have tvs that are just behind the ev (for lane changing)
+                        if x0[1] >= -2*car_dim['length']:
                             right_lane_free = False
                     ####
                             
                     
                     if lane_diff == 1:
-                        minus1_lane.append(current_tv_idx)
+                        #minus1_lane.append(current_tv_idx)
                         for k in range(N):
-                            cineq.append(float(qx[0]*x[k][11]+qx[1]*x[k][5]+qx[2]*x[k][4]+qx[3])) #case 225
+                            qt_stay[current_tv_idx][k][0] = 0
+                            qt_stay[current_tv_idx][k][1] = -1
+                            qt_stay[current_tv_idx][k][2] = 0
+                            qt_stay[current_tv_idx][k][3] = 0.5*tv_states[k][2]
+                             #case 225
                         print("case 225 added")
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
-                        if tv_state[4] >= -1.5*car_dim['length']:
+                        if x0[1] >= -2*car_dim['length']:
                             left_lane_free = False
                             print("updated left lane")
                     elif lane_diff == -1:
-                        plus1_lane.append(current_tv_idx)
+                        #plus1_lane.append(current_tv_idx)
                         for k in range(N):
-                            cineq.append(float(qy[0]*x[k][11]+qy[1]*x[k][5]+qy[2]*x[k][4]+qy[3])) #case 220
+                            qt_stay[current_tv_idx][k][0] = 0
+                            qt_stay[current_tv_idx][k][1] = 1
+                            qt_stay[current_tv_idx][k][2] = 0
+                            qt_stay[current_tv_idx][k][3] = -0.5*tv_states[k][2] #case 220
                         print("case 220 added")
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
-                        if tv_state[4] >= -1.5*car_dim['length']:
+                        if x0[1] >= -2*car_dim['length']:
                             right_lane_free = False
                             print("updated right lane")
 
 
 
                     elif lane_diff == 0: #tv is in same lane
-                        #apply case 210 to the tv
-                        #if case210 not in cond_array:
                         for k in range(N):
-                            cineq.append(float(qt[0]*x[k][11]+qt[1]*x[k][5]+qt[2]*x[k][4]+qt[3])) #case 210
+                            qt_stay[current_tv_idx][k][0] = -Delta * tv_states[k][1] #speed
+                            qt_stay[current_tv_idx][k][1] = 0
+                            qt_stay[current_tv_idx][k][2] = -1
+                            qt_stay[current_tv_idx][k][3] = tv_states[k][0] - min_dist - car_dim['length']  #case 210  #xi
+                            
                         print("case210 added")
-                        if tv_state[4] > 0:
-                            car_ahead.append(current_tv_idx) # 
+                        if tv_states[0][0] > 0:
+                            car_ahead = current_tv_idx # 
                             print("car ahead added")
                         if not closest_front_vehicle:#check if not defined or if this tv is closer than previously tv that set this bound
-                            closest_front_vehicle = tv_state
+                            closest_front_vehicle = x0s
                             print("updated closest car")
-                        elif closest_front_vehicle[4] > tv_state[4]:
-                        
-                            closest_front_vehicle = tv_state
+                        elif closest_front_vehicle[0][0] > tv_states[0][0]:
+                            closest_front_vehicle = tv_states
                             print("updated closest car")
 
                 current_tv_idx += 1
 
-            def cond_clean(conditions, takeout):
-                #for taking out desired TV's constraints 
+            # def cond_clean(conditions, takeout):
+            #     #for taking out desired TV's constraints 
 
-                #cleaned = np.ndarray.tolist(conditions)
-                cleaned = conditions
-                #list_conditions = np.ndarray.tolist(conditions)
-                #list_takeout= np.ndarray.tolist(takeout)
-                print("clenaed", cleaned)
-                #pdb.set_trace()
-                for cond in takeout:
-                    for i in range(N): #to take out all time steps of a tv's constraints
-                        #print("ind", i)
-                        cleaned.pop(cond * N)
-                return cleaned
+            #     #cleaned = np.ndarray.tolist(conditions)
+            #     cleaned = conditions
+            #     #list_conditions = np.ndarray.tolist(conditions)
+            #     #list_takeout= np.ndarray.tolist(takeout)
+            #     print("clenaed", cleaned)
+            #     #pdb.set_trace()
+            #     for cond in takeout:
+            #         for i in range(N): #to take out all time steps of a tv's constraints
+            #             #print("ind", i)
+            #             cleaned.pop(cond * N)
+            #     return cleaned
 
-            if plus1_lane:
-                plus1_lane.sort(reverse=True) #so indexes dont get messed up when i pop them
-            if minus1_lane:
-                minus1_lane.sort(reverse=True) #so the indexes dont get messed up
+            # if plus1_lane:
+            #     plus1_lane.sort(reverse=True) #so indexes dont get messed up when i pop them
+            # if minus1_lane:
+            #     minus1_lane.sort(reverse=True) #so the indexes dont get messed up
+
+
             #print("ev yaw", ev_state[6])
-            print("min dist:", Delta*tv_state[3]+min_dist)
-            if car_ahead:
+            print("lane stay case added")
+            #pdb.set_trace()
+            if car_ahead != None:
                 print("CAR AHEAD!! BEGIN CHANGE LANES") #immediately wehn condition is applied it steers out of control. I think min dist is too high
 
-                
-                # prev_state = xy2frenet_wp_specific(self._vehicle, self._map, self._previous_wp_queue[0] , self._sampling_radius)
-                # print("prev eta:", prev_state)
-                # case21121 = np.array([0, 1, 0, -(prev_state[5] - 0.2)])  #x[5] < self._previous_wp_queue[0] - 0.2
                 #print("tv to ev", closest_front_vehicle[4])
                 
                 if right_lane_free == True or left_lane_free == True: #either lanes free to use to overtake?
                     if right_lane_free == True:
                         print("right lane free")
+                        #Delta * closest_front_vehicle[3], 0, 1,(-closest_front_vehicle[4] + min_dist + car_dim['length'])
+                        #case21121 = np.array([0,-1, (closest_front_vehicle[4] - 2 * car_dim['length'])/(2.5* car_dim['width'] + closest_front_vehicle[5] - ev_state[5]), (ev_state[5]-car_dim['width'])])
+                        for s in range(N):
+                            qt_change[car_ahead][s][0] =  0 #kap
+                            qt_change[car_ahead][s][1] =  0 #-(tv_states[s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][2] =  -1  #x[4] #xi , eta, eta
+                            qt_change[car_ahead][s][3] =  tv_states[s][0] - car_dim['length'] #const
                         #cond_array = np.array([e.all() for e in cond_array if e.all() not in minus1_lane]) 
                         #pdb.set_trace()
-                        cond_clean(cineq, plus1_lane)
-                        print("removed right lane constraints")
+                        # cond_clean(cineq, plus1_lane)
+                        # print("removed right lane constraints")
                     if left_lane_free == True:
                         print("left lane free")
+
+                        for s in range(N):
+                            qt_change[car_ahead][s][0] =  0 #kap
+                            qt_change[car_ahead][s][1] =  0 #(tv_states[s][0] - ev_state[4] - car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][2] =  -1 
+                            qt_change[car_ahead][s][3] =  tv_states[s][0] - car_dim['length']#const eta
+                        print("min_dist", min_dist)
+                        print("qt_ change", qt_change)
                     #the problem is being able to tell which array of lane cond to remove
-                        cond_clean(cineq, minus1_lane)
-                        print("removed left lane constraints")
+                        # cond_clean(cineq, minus1_lane)
+                        # print("removed left lane constraints")
                         #cond_array = np.array([e.all() for e in cond_array if e.all() not in plus1_lane])
                     #cond_array = [e.all() for e in cond_array if e.all() not in car_ahead]
-                    cond_clean(cineq, car_ahead)
-                    print("removed front constraints")
-                    for k in range(N):
-                            cineq.append(qz[0]*x[k][11]+qz[1]*x[k][5]+qz[2]*x[k][4]+qz[3]) #case 21121
-                    print("case21121 added")
-        print("returning cineq")
-        print("--- %s seconds ---" % (time.time() - start_time))
+                    # cond_clean(cineq, car_ahead)
+                    # print("removed front constraints")
+                    print("lane change case added")
+                    return qt_change
+        print("returning qt_stay", qt_stay)
 
-        pdb.set_trace()
-        return np.asarray(cineq) # return constraints in array form (instead of list)
+        #print("--- %s seconds ---" % (time.time() - start_time))
+
+        #pdb.set_trace()
+        return qt_stay # return constraints in array form (instead of list)
     # def u_retrieve():
     #     x0 = pdb.set_trace
 
