@@ -512,9 +512,9 @@ class VehicleCurvMPC(object):
         tv_state_dim = 4  
 
 
-        # qt = np.zeros((len(self._tvs), N, tv_state_dim))
-        # # ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
-        # x0 = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] 
+        qt = np.zeros((len(self._tvs), N, tv_state_dim))
+        #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)
+        #x0 = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] 
         # for i in range(N):
         #     qt[0][i][0] = 0 #eta
         #     qt[0][i][1] = 1 #x[5]
@@ -527,6 +527,14 @@ class VehicleCurvMPC(object):
         #         print("previous eta", qt[0][i][3])
 
         # return qt
+
+        # for i in range(N):
+        #     qt[0][i][0] = 0 #eta
+        #     qt[0][i][1] = -1 #x[5]
+        #     qt[0][i][2] = 0 #x[4]
+        #     qt[0][i][3] = 2.5
+        # return qt
+        ##########################################
 
         
 
@@ -559,13 +567,15 @@ class VehicleCurvMPC(object):
             left_lane_free = True
             closest_front_vehicle = None
 
-            
+            all_tv_states = [0] * len(self._tvs)
+            print("number of tvs", len(self._tvs))
+
             for TV in self._tvs.values(): #change this for sensors implementation!
                 x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
 
-                print("current car", current_tv_idx)
+                print("current car:", current_tv_idx, "x0:", x0)
                 x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
-
+                
                 tv_states = [x0s] #subarray: xi, V_xi, eta, V_eta (TV FORM) SEQUENCE
                 for k in range(N):
                     TV_ref = [0, x0[3], 0, 0] ####make dynamic
@@ -573,6 +583,8 @@ class VehicleCurvMPC(object):
                         tv_states.append(self.dynamics_TV(tv_states[-1], [0,0], T)) #initial control inputs
                     else:
                         tv_states.append(self.dynamics_TV(tv_states[-1], self.Us_TV(tv_states[-2], TV_ref), T)) 
+
+                all_tv_states[current_tv_idx] = tv_states
 
                 #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
                 wp_tv = self._map.get_waypoint(TV.get_location(), project_to_road=True,
@@ -702,9 +714,9 @@ class VehicleCurvMPC(object):
                         #case21121 = np.array([0,-1, (closest_front_vehicle[4] - 2 * car_dim['length'])/(2.5* car_dim['width'] + closest_front_vehicle[5] - ev_state[5]), (ev_state[5]-car_dim['width'])])
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  0 #-(tv_states[s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  -(all_tv_states[car_ahead][s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
                             qt_change[car_ahead][s][2] =  -1  #x[4] #xi , eta, eta
-                            qt_change[car_ahead][s][3] =  tv_states[s][0] - car_dim['length'] #const
+                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2 * car_dim['length'] #const
                         #cond_array = np.array([e.all() for e in cond_array if e.all() not in minus1_lane]) 
                         #pdb.set_trace()
                         # cond_clean(cineq, plus1_lane)
@@ -714,10 +726,10 @@ class VehicleCurvMPC(object):
 
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  0 #(tv_states[s][0] - ev_state[4] - car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  (all_tv_states[car_ahead][s][0] - ev_state[4] - car_dim['length'] - min_dist) / (0.6*car_dim['width']) #x[5]
                             qt_change[car_ahead][s][2] =  -1 
-                            qt_change[car_ahead][s][3] =  tv_states[s][0] - car_dim['length']#const eta
-                        print("min_dist", min_dist)
+                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2* car_dim['length']#const eta
+                        print("tv_state", all_tv_states[car_ahead][0])
                         print("qt_ change", qt_change)
                     #the problem is being able to tell which array of lane cond to remove
                         # cond_clean(cineq, minus1_lane)
