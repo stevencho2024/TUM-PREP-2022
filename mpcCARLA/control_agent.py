@@ -1,10 +1,12 @@
 """ This module contains a model predictive controller to perform low-level waypoint following. """
 #performs MPC step calc, polynomial fit, and condition creation/application
 import glob
+import math
 import os
 from signal import SIG_DFL
 import sys
 import time
+import math
 
 from enum import Enum
 from collections import deque
@@ -82,6 +84,10 @@ class VehicleCurvMPC(object):
 
         # initializing controller
         self._init_controller(opt_dict)
+
+        self._car_width = 2
+        self._car_length = 6
+        self._lane_width = 3.5
 
     def __del__(self):
         if self._vehicle:
@@ -173,6 +179,70 @@ class VehicleCurvMPC(object):
 
         # Update target velocity to current speed limit
         self.set_speed()
+
+
+
+
+
+        ## exclude unwanted points 
+        v_vect = self._vehicle.get_velocity()
+        yaw = self._vehicle.get_transform.rotation.yaw
+        lane_vect_norm = np.linalg.norm(np.array([v_vect[0]*np.cos(yaw) - v_vect[1]*np.sin(yaw), v_vect[0]*np.sin(yaw) + v_vect[1]*np.cos(yaw)])) #this vector contains coefficients for the front plane
+        up_vect_norm = np.linalg.norm(np.array([0, 0, v_vect[2]])) 
+        side_vect_norm = np.linalg.norm(np.cross(lane_vect_norm,up_vect_norm)) #this is also coefficients for side plane
+
+        ev_location = self._vehicle.get_transform.location #xyz
+        closest_lane_location  = map.get_waypoint(self._vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+
+        # Function to find shortestdistance between point and plane
+        def shortest_distance(point, norm_vect, pnt_in_plane):
+            #point (array): 3D point that you want to find the distance from the plane
+            #norm_vector (array): the plane's normal vector 
+            #pnt_in_plane (array): the pont in the plane to give a position in space (typically the EV's transform)
+
+            a = norm_vect[0]
+            b = norm_vect[1]
+            c = norm_vect[2]
+            d = a*pnt_in_plane[0] + b*pnt_in_plane[1] + c*pnt_in_plane[2]
+
+            x1 = point[0]
+            y1 = point[1]
+            z1 = point[2]
+
+            d = abs((a * x1 + b * y1 + c * z1 + d))
+            e = (math.sqrt(a * a + b * b + c * c))
+            shortest_dist = d/e
+
+            #for efficiency possibly
+            # d = norm_vect[0]*pnt_in_plane[0] + norm_vect[1]*pnt_in_plane[1] + norm_vect[2]*pnt_in_plane[2]
+            # return abs((norm_vect[0] * point[0] + norm_vect[1] * point[1] + norm_vect[2] * point[2] + d)) / math.sqrt(norm_vect[0] ** 2 + norm_vect[1] ** 2 + norm_vect[2] ** 2)
+
+            return shortest_dist
+        
+        #array of points and distance
+        relvnt_pnts = []
+        relvnt_front_pnts = [] 
+        relvnt_side_pnts = []
+        
+        for location in carla.lidar_measurement:
+            #this makes a vision rectangular box around EV 10.5 by 54
+            if (abs(shortest_distance(location, lane_vect_norm, closest_lane_location)) <= 4.5*self._car_length) & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= self._lane_width): #initial box
+                relvnt_pnts.append([location, shortest_distance(location, lane_vect_norm, closest_lane_location)])
+                if shortest_distance(location, lane_vect_norm, closest_lane_location) > 0.5*self._car_length & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= 0.3*self._lane_width): #for cars ahead THIS MAY FAIL
+                    relvnt_front_pnts.append([location, shortest_distance])
+                elif (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) > 0.5*self._lane_width): #for cars on the side
+                    relvnt_side_pnts.append([location, shortest_distance])
+
+
+        #make a dictionary of TVs (how to discern between EVs) cluster algorithms online (gaussian mixture model), then average the points
+        #give xi, V, eta of each tv (there are already functions amde for eta, xi, and V) we just need the right xyz points
+        #plug the values into array where it can be accessed
+
+
+
+
+
+
 
         # Trigger a lane change
         # if timestep / 30 == 12:
@@ -568,10 +638,14 @@ class VehicleCurvMPC(object):
             closest_front_vehicle = None
 
             all_tv_states = [0] * len(self._tvs)
-            print("number of tvs", len(self._tvs))
+            #print("number of tvs", len(self._tvs))
 
             for TV in self._tvs.values(): #change this for sensors implementation!
-                x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
+                ##with direct carla tv wp data
+                #x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
+
+                #with lidar data
+                x0 = xy2frenet_pnt_specific( self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
 
                 print("current car:", current_tv_idx, "x0:", x0)
                 x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
@@ -596,7 +670,7 @@ class VehicleCurvMPC(object):
 
                 if euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location) <= max_surveilance_rad or x0[1] < 30: #if within a certain radius of the ev HARD CODED FOR NOW ########### bc max range on eta calc
                     lane_diff = wp_ev.lane_id - wp_tv.lane_id
-                    print("distance:", euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location))
+                    #print("distance:", euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location))
                     #### because there is no lane zero
                     if wp_ev.lane_id == 1 & wp_tv.lane_id == -1:
                         for k in range(N):
@@ -714,23 +788,23 @@ class VehicleCurvMPC(object):
                         #case21121 = np.array([0,-1, (closest_front_vehicle[4] - 2 * car_dim['length'])/(2.5* car_dim['width'] + closest_front_vehicle[5] - ev_state[5]), (ev_state[5]-car_dim['width'])])
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  -(all_tv_states[car_ahead][s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1.2 * car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  -(all_tv_states[car_ahead][s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1* car_dim['width']) #x[5]
                             qt_change[car_ahead][s][2] =  -1  #x[4] #xi , eta, eta
                             qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2 * car_dim['length'] #const
                         #cond_array = np.array([e.all() for e in cond_array if e.all() not in minus1_lane]) 
                         #pdb.set_trace()
                         # cond_clean(cineq, plus1_lane)
                         # print("removed right lane constraints")
-                    if left_lane_free == True:
+                    elif left_lane_free == True:
                         print("left lane free")
 
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  (all_tv_states[car_ahead][s][0] - ev_state[4] - car_dim['length'] - min_dist) / (0.6*car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  (all_tv_states[car_ahead][s][0] - ev_state[4] - car_dim['length'] - min_dist) / (1*car_dim['width']) #x[5]
                             qt_change[car_ahead][s][2] =  -1 
                             qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2* car_dim['length']#const eta
-                        print("tv_state", all_tv_states[car_ahead][0])
-                        print("qt_ change", qt_change)
+                        #print("tv_state", all_tv_states[car_ahead][0])
+                        #print("qt_ change", qt_change)
                     #the problem is being able to tell which array of lane cond to remove
                         # cond_clean(cineq, minus1_lane)
                         # print("removed left lane constraints")
@@ -738,9 +812,9 @@ class VehicleCurvMPC(object):
                     #cond_array = [e.all() for e in cond_array if e.all() not in car_ahead]
                     # cond_clean(cineq, car_ahead)
                     # print("removed front constraints")
-                    print("lane change case added")
+                    print("returned qt_change")
                     return qt_change
-        print("returning qt_stay", qt_stay)
+        print("returned qt_stay")
 
         #print("--- %s seconds ---" % (time.time() - start_time))
 
