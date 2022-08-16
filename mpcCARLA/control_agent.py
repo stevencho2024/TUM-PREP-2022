@@ -20,6 +20,7 @@ import cmath
 from scipy import optimize as opt
 from scipy.linalg import block_diag
 from collections import deque
+from sklearn.cluster import DBSCAN
 np.set_printoptions(precision=4, suppress=True)
 
 try:
@@ -88,6 +89,9 @@ class VehicleCurvMPC(object):
         self._car_width = 2
         self._car_length = 6
         self._lane_width = 3.5
+        self._lidar_height = 1.6
+        self._last_frenet_tvs = {'front': 0, 'right': 0, 'left':0}
+      
 
     def __del__(self):
         if self._vehicle:
@@ -186,13 +190,22 @@ class VehicleCurvMPC(object):
 
         ## exclude unwanted points 
         v_vect = self._vehicle.get_velocity()
-        yaw = self._vehicle.get_transform.rotation.yaw
-        lane_vect_norm = np.linalg.norm(np.array([v_vect[0]*np.cos(yaw) - v_vect[1]*np.sin(yaw), v_vect[0]*np.sin(yaw) + v_vect[1]*np.cos(yaw)])) #this vector contains coefficients for the front plane
+
+        #getting theta angle wrt to trajectory
+        wp_current = map.get_waypoint(self._vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+        wp_next = wp_current.next(2)[0]
+        angle_wp = get_wp_angle(wp_current, wp_next) #gets angle of waypoints wrt x axis
+        yaw = self._vehicle.get_transform().rotation.yaw #vehicle angle wrt x-axis
+        vehicle_heading = wrap2pi(np.pi - np.deg2rad(round(yaw, 3)))
+        theta = wrap2pi(vehicle_heading - angle_wp) #angle offset of car from trajectory
+
+
+        lane_vect_norm = np.linalg.norm(np.array([v_vect[0]*np.cos(theta) - v_vect[1]*np.sin(theta), v_vect[0]*np.sin(theta) + v_vect[1]*np.cos(theta), 0])) #this vector contains coefficients for the front plane (doesn't work for steep incline/ declines)
         up_vect_norm = np.linalg.norm(np.array([0, 0, v_vect[2]])) 
         side_vect_norm = np.linalg.norm(np.cross(lane_vect_norm,up_vect_norm)) #this is also coefficients for side plane
 
-        ev_location = self._vehicle.get_transform.location #xyz
-        closest_lane_location  = map.get_waypoint(self._vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+        ev_location = self._vehicle.get_location #xyz
+        closest_lane_location  = map.get_waypoint(self._vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk)) #plane location based on location of EV 
 
         # Function to find shortestdistance between point and plane
         def shortest_distance(point, norm_vect, pnt_in_plane):
@@ -209,7 +222,7 @@ class VehicleCurvMPC(object):
             y1 = point[1]
             z1 = point[2]
 
-            d = abs((a * x1 + b * y1 + c * z1 + d))
+            d = (a * x1 + b * y1 + c * z1 + d) #distance with sign CHECK if okay
             e = (math.sqrt(a * a + b * b + c * c))
             shortest_dist = d/e
 
@@ -220,18 +233,79 @@ class VehicleCurvMPC(object):
             return shortest_dist
         
         #array of points and distance
-        relvnt_pnts = []
+        #relvnt_pnts = []
+
+        relvnt_front_pnts_sum = [0, 0, 0]
+        front_num_points = 0
         relvnt_front_pnts = [] 
-        relvnt_side_pnts = []
-        
+
+
+        relvnt_rightside_pnts = []
+        relvnt_rightside_pnts_sum = [0, 0, 0]
+
+        relvnt_leftside_pnts = []
+        relvnt_leftside_pnts_sum = [0, 0, 0]
+
+        TVs_avg_loc = []
+
+
         for location in carla.lidar_measurement:
-            #this makes a vision rectangular box around EV 10.5 by 54
-            if (abs(shortest_distance(location, lane_vect_norm, closest_lane_location)) <= 4.5*self._car_length) & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= self._lane_width): #initial box
-                relvnt_pnts.append([location, shortest_distance(location, lane_vect_norm, closest_lane_location)])
-                if shortest_distance(location, lane_vect_norm, closest_lane_location) > 0.5*self._car_length & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= 0.3*self._lane_width): #for cars ahead THIS MAY FAIL
-                    relvnt_front_pnts.append([location, shortest_distance])
-                elif (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) > 0.5*self._lane_width): #for cars on the side
-                    relvnt_side_pnts.append([location, shortest_distance])
+            if location[2] > -self._lidar_height + 0.3: #rid of ground points
+                location = [location[0]*np.cos(yaw) - location[1]*np.sin(yaw), location[0]*np.sin(yaw) + location[1]*np.cos(yaw), 0] #rotate the vector to match map 
+                location = [ev_location[0] + location[0], ev_location[1] + location[1], ev_location[2] + location[2]] #convert from lidar centric xyz to map (problem. ang)
+                #this makes a vision rectangular box around EV 10.5 by 54
+                if (abs(shortest_distance(location, lane_vect_norm, closest_lane_location)) <= 4.5*self._car_length) & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= self._lane_width): #initial box
+                    #relvnt_pnts.append(location)
+                    if shortest_distance(location, lane_vect_norm, closest_lane_location) > 0.5*self._car_length & (abs(shortest_distance(location, side_vect_norm, closest_lane_location)) <= 0.3*self._lane_width): #for cars ahead THIS MAY FAIL
+                        relvnt_front_pnts.append(location)
+                        np.add(relvnt_front_pnts_sum, location[0:3])
+                        front_num_points += 1
+
+                    elif (shortest_distance(location, side_vect_norm, closest_lane_location) > 0.5*self._lane_width): #for cars on the right side
+                        relvnt_rightside_pnts.append(location)
+                    elif (shortest_distance(location, side_vect_norm, closest_lane_location) < 0.5*self._lane_width): #for cars on the left side
+                        relvnt_leftside_pnts.append(location)
+            
+
+        #SCREW clusters just RID OF ground pints
+        # #cluster for one for front points
+        # # define the model
+        # model = KMeans(n_clusters=2, random_state=0).fit(relvnt_front_pnts) #currently 2100 points generated total with 20 lasers shooting 20000 each
+        # # fit model and predict clusters
+        # yhat = model.cluster_centers_(relvnt_front_pnts)
+        # # retrieve unique clusters
+        # clusters = np.unique(yhat)
+        print("no car front num points", len(relvnt_front_pnts))
+        print("no car left num points", len(relvnt_leftside_pnts))
+        print("no car right num points", len(relvnt_rightside_pnts))
+
+        if len(relvnt_front_pnts) > 5000:
+            front_tv_loc = relvnt_front_pnts_sum / front_num_points #avergae of all the front points
+            TVs_avg_loc.append([front_tv_loc, 'front'])
+        else:
+            self._last_frenet_tvs['front'] = 0
+
+        #clustering algorithm for one left and right side 
+        if len(relvnt_leftside_pnts) > 5000:
+            left_tv_loc = relvnt_front_pnts_sum / front_num_points #avergae of all the front points
+            TVs_avg_loc.append([left_tv_loc, 'left'])
+        else:
+            self._last_frenet_tvs['left'] = 0
+
+        if len(relvnt_rightside_pnts) > 5000:
+            right_tv_loc = relvnt_front_pnts_sum / front_num_points #avergae of all the front points
+            TVs_avg_loc.append([right_tv_loc, 'right'])
+        else:
+            self._last_frenet_tvs['right'] = 0
+    
+        #storing previous xi values
+        for car in len(TVs_avg_loc):
+            self._tvs[car] = xy2frenet_pnt_specific(self._vehicle, self._last_frenet_tvs[car][1], time_step, TVs_avg_loc[car][0], self._map, self._waypoint_buffer, self._sampling_radius)
+            self._last_frenet_tvs[TVs_avg_loc[car][1]] = self._tvs[car][0] #just xi
+
+
+
+        self._tvs = []
 
 
         #make a dictionary of TVs (how to discern between EVs) cluster algorithms online (gaussian mixture model), then average the points
@@ -642,10 +716,10 @@ class VehicleCurvMPC(object):
 
             for TV in self._tvs.values(): #change this for sensors implementation!
                 ##with direct carla tv wp data
-                #x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
+                x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
 
                 #with lidar data
-                x0 = xy2frenet_pnt_specific( self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
+                #x0 = xy2frenet_pnt_specific( self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
 
                 print("current car:", current_tv_idx, "x0:", x0)
                 x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
