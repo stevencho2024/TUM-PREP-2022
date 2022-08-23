@@ -57,10 +57,9 @@ def converting_mpc_u_to_control(u: np.array, debug=False):
     steer_value = u[1] / (np.pi/3)
     Input_steering_EV = float(-1 * steer_value)
 
-    print("u", u)
-    print("input accel", Input_acceleration_EV)
-    print("input brake", Input_brake_EV)
-    print("input steer", Input_steering_EV)
+    #print("input steer", Input_steering_EV)
+    #print("input accel", Input_acceleration_EV)
+    #print("input brake", Input_brake_EV)
     control = carla.VehicleControl(throttle=float(Input_acceleration_EV), steer=float(Input_steering_EV), brake=float(Input_brake_EV), )
 
     if debug:
@@ -224,7 +223,7 @@ class MPCController:
         self._R = np.array([[0.03, 0],
                             [0, 15], ])
         self._S = np.array([[0.33, 0],
-                            [0, 4 * 15], ])
+                            [0, 4 * 15], ]) #4 before
         self._C = np.diag(self._Ns)
 
     def _init_controller_MPCcont(self, args_mpc_functions=None):
@@ -246,7 +245,7 @@ class MPCController:
         self.u_diff = lambda x, u: u - np.array([x[7], x[8]])
         # Defining lambda function for delta_xi and alpha
         self.dxi = lambda x, u: (1 / (1 - x[9] * x[5])) * x[3] * np.cos(x[6] + self.alpha(u))
-        print("dxi defined")
+        #print("dxi defined")
         self.kappa = lambda x: wp.func_kappa(x,self._kr)
 
 
@@ -274,17 +273,17 @@ class MPCController:
         #N: number of time steps
         #x0: initial state
         #xref: 
-
         U0 = U
         x = [x0]
         for k in range(N):
             x.append(self.dynamics(x[-1],U0[k*m:(k+1)*m], kap)) # state sequence
         u_last = u_1    # state applied during previous step
+        
         cost = 0 # initialize overall cost with scalar value 0
         for k in range(N):
             dx = x[k]-xref
             u0 = U0[k*m:(k+1)*m]
-            du = u0-u_last
+            du = np.abs(u0-u_last)
             cost += (dx.T.dot(Q)).dot(dx)+(u0.T.dot(R)).dot(u0)+(du.T.dot(S)).dot(du)
             u_last = u0
         #print("boutta return cost")
@@ -306,7 +305,9 @@ class MPCController:
 
         for TV in range(len(qt)):
             for k in range(N): #k is for time step
-                cineq.append(float(qt[TV][k][0]*kap + qt[TV][k][1]*x[k][2] + qt[TV][k][2]*x[k][1] + qt[TV][k][3])) #<=0
+                # if qt[TV][k][1] != 0 and qt[TV][k][2] != 0:
+                #     pdb.set_trace()
+                cineq.append(float(qt[TV][k][0]*kap + qt[TV][k][1]*x[k][2] + qt[TV][k][2]*x[k][1] + qt[TV][k][3])) #<=0 [kap, 5, 4, const]
         #pdb.set_trace()
         #print("about to return cstr ineq")
         
@@ -372,7 +373,7 @@ class MPCController:
             #pdb.set_trace()
         else:
             U0 = self.guess
-            print("used self guess", U0) ################# improve
+            #print("used self guess", U0) ################# improve
             #pdb.set_trace()
         
         #setting bounds 
@@ -386,7 +387,7 @@ class MPCController:
         #print("bounds", bds)
 
 
-        res = opt.minimize(self.costf, U0, args=(N, x0s, xref, u_1, Q, R, S, m, kap), ###########
+        res = opt.minimize(self.costf, U0, args=(N, x0s, xref, u_1, Q, R, S, m, kap), ########### cannot be 
                     method="SLSQP", bounds=bds, constraints=cstr)
         u = res.x.reshape(-1, 1) #sequence of U
         #cost0 = costf(u, N, x0, xref, u_1, Q, R, S, m)
@@ -402,7 +403,7 @@ class MPCController:
         u_data1 = np.squeeze(        u[::2]) #array of accel
         u_data2 = np.squeeze(        u[1::2]) #array of steering
         u_log = np.array([u_data1, u_data2])
-        t_log = 0
+        #t_log = 0
         x_log = np.zeros((self._Nt, self._Nx))
         # for t_log in range(self._Nt):
         #     x_log[t_log, :] = np.squeeze(        solvers[mpc_solver].var["x", t_log])
@@ -418,11 +419,12 @@ class MPCController:
             wp.draw_vehicle_bounding_box(self._world, loc, x_log[self._Nt-1, 2])
         
         status = res.success
-        print("status", status)
-        print("before u", u)
-        print("done with one MPC cycle", time.time() - start_time)
+        if status:
+            print("status", status)
+        #print("before u", u) #accel, steering 
+        #print("done with one MPC cycle", time.time() - start_time)
         if log:
-            return status, converting_mpc_u_to_control(u, debug),self.state, self._last_control, u_log, x_log, time.time() - start_time
+            return status, converting_mpc_u_to_control(u, debug), self.state, self._last_control, u_log, x_log, time.time() - start_time
         else:
             return status, converting_mpc_u_to_control(u, debug)
 
@@ -521,10 +523,10 @@ class CurvMPCController(MPCController):
                             [0, 0, 0, 4 * 0.25], ])
         #print("defined Q", self._Q)
         
-        self._R =0.001* np.array([[0.03, 0],
-                            [0, 15], ])
-        self._S = 0.001*np.array([[0.33, 0],
-                            [0, 4 * 15], ])
+        self._R = np.array([[0.03, 0],
+                            [0, 55], ]) #originally 15
+        self._S = np.array([[0.33, 0], #make car more wanting to slow down originally 0.33
+                            [0, 15 * 15], ]) #originally 4
         #self._C = np.diag(self._Ns)
 
     def update_curvature(self, kr):
@@ -646,6 +648,10 @@ class CurvMPCController(MPCController):
                 prediction[i] = self.dynamics(current_state, self._last_control, self.state[9])
 
             return converting_mpc_u_to_control(self._last_control, debug), self.state, prediction, self._last_control
+
+
+
+
 
 
 # """ This module contains PID controllers to perform lateral and longitudinal control. """
