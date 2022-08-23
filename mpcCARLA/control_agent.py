@@ -64,6 +64,9 @@ class VehicleCurvMPC(object):
         self.curv_x0 = 0
         self.desired_lane_id = 0
 
+        self.T = 0.2 #sampling time
+        self.K = np.array([[0, -0.55, 0, 0],[0, 0, -0.63, -1.15]]) #from the paper
+
         # Option for the MPC controller
         self.manual_control_on = False
 
@@ -92,6 +95,35 @@ class VehicleCurvMPC(object):
         self._lidar_height = 1.6
         self._last_frenet_tvs = {'front': 0, 'right': 0, 'left':0}
         self._TV_locs = []
+        self.A = np.array([[1, self.T, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, self.T],
+            [0, 0, 0, 1] 
+            ])
+
+        self.B = np.array([[0.5*(self.T ** 2), 0],
+            [self.T, 0],
+            [0, 0.5*(self.T ** 2)],
+            [0, self.T]])
+        self.timesteps = 5 #within one MPC cycle
+        self.wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
+                                        lane_type=(carla.LaneType.Driving))
+
+    def stoch_bubble(self):
+        #propagates the array uncertainty of tv_state variables (xi, v_xi, eta, V_eta)of the lidar data. 
+        #returns a 2D diag array
+        #intended for car_dim modification 
+        var_x0_tv = np.diag((0.05, 0.01, 0.05, 0.01))
+        var_omega = np.diag((0.1, 0.05, 0.1, 0.05))
+        vars_tv = [var_x0_tv]
+        Bk = np.matmul(self.B, self.K)
+        coeff = np.add(self.A, Bk)
+        second_term = np.matmul(self.B, np.matmul(var_omega, np.transpose(self.B)))
+        for n in range(self.timesteps):
+            first_term = np.matmul(coeff, np.matmul(vars_tv[n],np.transpose(coeff)))
+            next_var_tv = first_term + second_term
+            vars_tv.append(next_var_tv)
+        return vars_tv
 
     def __del__(self):
         if self._vehicle:
@@ -214,7 +246,7 @@ class VehicleCurvMPC(object):
             if self._sampling_radius < 2:
                 self._sampling_radius = 3
 
-
+            self._tvs = [] #reset self._tvs
 
             ###compute waypoints will have to be modified into using sensor data######
             # Getting future waypoints
@@ -324,29 +356,32 @@ class VehicleCurvMPC(object):
     
             for location in data: #data is in the form of lidarMeasurement (array of lidarDetection)
                 #pdb.set_trace()
-                if location.point.z > -self._lidar_height + 0.1: #rid of ground points
+                if (location.point.z > -self._lidar_height + 0.1) and (location.intensity < 0.99): #rid of ground points and points caused by the EV itself
                     lid_location = [location.point.x*np.cos(yaw_rad) - location.point.y*np.sin(yaw_rad), location.point.x*np.sin(yaw_rad) + location.point.y*np.cos(yaw_rad), 0] #rotate the vector from lidar xyz orientation to match map xyz oreintation
                     #pdb.set_trace()
-                    location = [ev_location.x + lid_location[0], ev_location.y + lid_location[1], ev_location.z + lid_location[2]] #convert from lidar centric xyz to map (problem. ang)
+                    pnt_location = [ev_location.x + lid_location[0], ev_location.y + lid_location[1], ev_location.z + lid_location[2]] #convert from lidar centric xyz to map (problem. ang)
                     #this makes a vision rectangular box around EV 10.5 by 54
-                    long_dist = shortest_distance(location, lane_vect_norm, closest_lane_location) #closest lane is fine, location is fine
-                    lat_dist = shortest_distance(location, side_vect_norm, closest_lane_location)
+                    long_dist = shortest_distance(pnt_location, lane_vect_norm, closest_lane_location) #closest lane is fine, location is fine
+                    lat_dist = shortest_distance(pnt_location, side_vect_norm, closest_lane_location)
                     #pdb.set_trace()
-                    if (abs(long_dist) <= 4.5*self._car_length) and (abs(lat_dist) <= 1.5*self._lane_width): #initial box
+                    if (abs(long_dist) <= 4.5*self._car_length) and (abs(lat_dist) <= 1.3*self._lane_width): #initial box
                         #relvnt_pnts.append(location)
-                        if (long_dist > 2.6) and (abs(lat_dist) <= 0.5*self._lane_width): #for cars ahead THIS MAY FAIL
-                            relvnt_front_pnts.append(location)
-                            relvnt_front_pnts_sum = np.add(relvnt_front_pnts_sum, location[0:3])
+                        if (long_dist > 2.7) and (abs(lat_dist) <= 0.5*self._lane_width): #for cars ahead 2.7 is to ignore the front part of the EV
+                            relvnt_front_pnts.append(pnt_location)
+                            #print("FRONT intensity", location.intensity)
+                            relvnt_front_pnts_sum = np.add(relvnt_front_pnts_sum, pnt_location)
                             front_num_points += 1
                             #pdb.set_trace()
-                        elif (lat_dist > 0.4*self._lane_width): #for cars on the right side
-                            relvnt_rightside_pnts.append(location)
-                            relvnt_rightside_pnts_sum = np.add(relvnt_rightside_pnts_sum, location[0:3])
+                        elif (lat_dist > 0.5*self._lane_width): #for cars on the right side
+                            relvnt_rightside_pnts.append(pnt_location)
+                            #print("RIGHT intensity", location.intensity)
+                            relvnt_rightside_pnts_sum = np.add(relvnt_rightside_pnts_sum, pnt_location)
                             right_num_points += 1
-                            #pdb.set_trace()
-                        elif (lat_dist < -0.4*self._lane_width): #for cars on the left side
-                            relvnt_leftside_pnts.append(location)
-                            relvnt_leftside_pnts_sum = np.add(relvnt_leftside_pnts_sum, location[0:3])
+                            # if pnt_location[1] > -65:
+                            #     pdb.set_trace()
+                        elif (lat_dist < -0.5*self._lane_width): #for cars on the left side
+                            relvnt_leftside_pnts.append(pnt_location)
+                            relvnt_leftside_pnts_sum = np.add(relvnt_leftside_pnts_sum, pnt_location)
                             left_num_points += 1
                             #pdb.set_trace()
 
@@ -363,32 +398,41 @@ class VehicleCurvMPC(object):
             print("no left", len(relvnt_leftside_pnts))
             print("no right", len(relvnt_rightside_pnts))
             #pdb.set_trace()
-            if len(relvnt_front_pnts) > 3:
+            if len(relvnt_front_pnts) >= 3 :
                 front_tv_loc = np.divide(relvnt_front_pnts_sum, front_num_points) #avergae of all the front points
-                self.TVs_avg_loc.append([front_tv_loc, 'front'])
+                TVs_avg_loc.append([front_tv_loc, 'front'])
             else:
                 self._last_frenet_tvs['front'] = 0
 
             #clustering algorithm for one left and right side 
-            if len(relvnt_leftside_pnts) > 3:
+            if len(relvnt_leftside_pnts) > 3 :
                 left_tv_loc = np.divide(relvnt_leftside_pnts_sum, left_num_points) #avergae of all the left points
                 TVs_avg_loc.append([left_tv_loc, 'left'])
             else:
                 self._last_frenet_tvs['left'] = 0
 
-            if len(relvnt_rightside_pnts) > 3:
+            if len(relvnt_rightside_pnts) > 3 :
                 right_tv_loc = np.divide(relvnt_rightside_pnts_sum, right_num_points) #avergae of all the right points
-                TVs_avg_loc.append([right_tv_loc, 'right'])
+                pnt_loc = carla.Location(x=right_tv_loc[0], y=right_tv_loc[1], z=right_tv_loc[2])
+                wp = self._map.get_waypoint(pnt_loc, project_to_road=True,
+                                        lane_type=(carla.LaneType.Driving))
+                if wp.lane_id != self.wp_ev.lane_id:
+                    TVs_avg_loc.append([right_tv_loc, 'right'])
+                    # if right_tv_loc[0] < -20:
+                    #     pdb.set_trace()
             else:
                 self._last_frenet_tvs['right'] = 0
             #storing previous xi values and getting frenet state for each TV
             for car in range(len(TVs_avg_loc)):
+                #print("first frenet after ev")
                 #pdb.set_trace()
-                self._tvs.append(xy2frenet_pnt_specific(self._vehicle, self._last_frenet_tvs[TVs_avg_loc[car][1]], self._time_step, TVs_avg_loc[car][0], self._map, self._waypoint_buffer, self._sampling_radius)) #first iteration is not accuarate becasue of lack of previous 
+                frenet = xy2frenet_pnt_specific(self._vehicle, self._last_frenet_tvs[TVs_avg_loc[car][1]], self._time_step, TVs_avg_loc[car][0], self._map, self._waypoint_buffer, self._sampling_radius)
+                #pdb.set_trace()
+                self._tvs.append(frenet) #first iteration is not accuarate becasue of lack of previous 
 
                 self._last_frenet_tvs[TVs_avg_loc[car][1]] = self._tvs[car][0] #just xi (each term is in TV form)
                 self._TV_locs.append(TVs_avg_loc[car][0]) #store all the TV locations
-
+                #pdb.set_trace()
         
         
         
@@ -615,24 +659,25 @@ class VehicleCurvMPC(object):
     def dynamics_TV(self, x, u, T):
         #x: array, xi, eta, V_xi, V_eta
         #u: array, accel, speed
+        #returns next state in TV form
         
 
-        A = [[1, T, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 1, T],
-            [0, 0, 0, 1] 
-            ]
+        # A = [[1, T, 0, 0],
+        #     [0, 1, 0, 0],
+        #     [0, 0, 1, T],
+        #     [0, 0, 0, 1] 
+        #     ]
 
-        B = [[0.5*(T ** 2), 0],
-            [T, 0],
-            [0, 0.5*(T ** 2)],
-            [0, T]]
+        # B = [[0.5*(T ** 2), 0],
+        #     [T, 0],
+        #     [0, 0.5*(T ** 2)],
+        #     [0, T]]
 
-        a = np.array(A)
-        b = np.array(B)
+        # a = np.array(A)
+        # b = np.array(B)
 
-        first_term = np.matmul(a, x)
-        second_term = np.matmul(b, u)
+        first_term = np.matmul(self.A, x)
+        second_term = np.matmul(self.B, u)
         
         next_state = first_term + second_term
 
@@ -649,14 +694,15 @@ class VehicleCurvMPC(object):
                 diff_array.append(xk[i] - xref[i]) #dxi, deta, dv_xi, dv_eta
         else:
             print("index size not matching")
-        K = np.array([[0, -0.55, 0, 0],[0, 0, -0.63, -1.15]]) #from the paper
-        u_next = np.matmul(K, diff_array)
+        #self.K = np.array([[0, -0.55, 0, 0],[0, 0, -0.63, -1.15]]) #from the paper
+        u_next = np.matmul(self.K, diff_array)
         return u_next # longitudinal acc, horizontal acc
 
 
     def getqs(self, N):
         """
         Returning the coefficients used in the constraint inequalities 
+        Also utilizes the stochastic aspect
         """
         
         #U (array): input sequence
@@ -710,12 +756,15 @@ class VehicleCurvMPC(object):
         qt_stay = np.zeros((len(self._tvs), N, tv_state_dim)) # initialize list of constraints
         qt_change = np.zeros((len(self._tvs), N, tv_state_dim))
         
-        T = 0.2 #sampling time
+        self.T = 0.2 #sampling time
+
         # vehicle size
+        # length_var = self.stoch_bubble()[-1][0][0] #last timestep variance in xi
+        # print("length_var=", length_var)
         car_dim = {'width': 2, 'length': 6}
 
         # Setting min distance to half of the current speed
-        min_dist = 0.1 * get_speed(self._vehicle) #OG 0.5
+        min_dist = 0.2 * get_speed(self._vehicle) #OG 0.5 0.2 did not work
         Delta = 0.2
         
         #cond_lane_dict = {}
@@ -727,6 +776,8 @@ class VehicleCurvMPC(object):
 
         max_surveilance_rad = 20 #20 meters due to xi's limit in determining xi values
 
+        constraints = []
+
         if self._tvs: ##remember this guy!        
             wp_ev = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True,
                                         lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
@@ -734,40 +785,46 @@ class VehicleCurvMPC(object):
             #free_lane4change = [wp_ev.lane_id + 1, wp_ev.lane_id - 1] #for knowing which lane is free to use for overtaking 
             right_lane_free = True
             left_lane_free = True
-            closest_front_vehicle = None
+            #closest_front_vehicle = None
 
             all_tv_states = [0] * len(self._tvs)
-            #print("number of tvs", len(self._tvs))
+            print("number of tvs", len(self._tvs))
+            bob = carla.Location(x=-20.1351, y=-136.132, z=0.0)
+            print("lane", self._map.get_waypoint(bob, project_to_road=True,
+                                        lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk)).lane_id)
 
             for TV in range(len(self._tvs)): #change this for sensors implementation!
                 ##with direct carla tv wp data
                 #x0 = xy2frenet_wp(TV, self._map, self._waypoint_buffer, self._sampling_radius)[3:7] #changing to frenet coordinates   #0,1,2,3 ---- 3,4,5,6 index conversion #CURRENT state (EV form)
-
+                #x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
                 #with lidar data
-                x0 = self._tvs[TV]
+                x0 = self._tvs[TV] #dict in TV form
 
                 print("current car:", current_tv_idx, "x0:", x0)
-                x0s = [x0[1], x0[0] * np.cos(x0[3]), x0[2], x0[0] * np.sin(x0[3])] #array: xi, speed, eta, V_eta (TV FORM) ####
+                x0s = x0 #array: xi, speed, eta, V_eta (TV FORM) ####
                 
                 tv_states = [x0s] #subarray: xi, V_xi, eta, V_eta (TV FORM) SEQUENCE
                 for k in range(N):
                     TV_ref = [0, x0[3], 0, 0] ####make dynamic
                     if k == 0:
-                        tv_states.append(self.dynamics_TV(tv_states[-1], [0,0], T)) #initial control inputs
+                        tv_states.append(self.dynamics_TV(tv_states[-1], [0,0], self.T)) #initial control inputs
                     else:
-                        tv_states.append(self.dynamics_TV(tv_states[-1], self.Us_TV(tv_states[-2], TV_ref), T)) 
+                        tv_states.append(self.dynamics_TV(tv_states[-1], self.Us_TV(tv_states[-2], TV_ref), self.T)) 
 
                 all_tv_states[current_tv_idx] = tv_states
 
                 #ev_state = xy2frenet_wp(self._vehicle, self._map, self._waypoint_buffer, self._sampling_radius) #changing to frenet coordinates
-                temp_tv_actor = self._vehicle
-                temp_tv_actor.get_location().x = self._TV_locs[TV][0]
-                temp_tv_actor.get_location().y = self._TV_locs[TV][1]
-                temp_tv_actor.get_location().z = self._TV_locs[TV][2]
-                wp_tv = self._map.get_waypoint(temp_tv_actor.get_location(), project_to_road=True,
+               
+                tv_locat = carla.Location(x= self._TV_locs[TV][0], y=self._TV_locs[TV][1], z=self._TV_locs[TV][2])
+                print('TV:', self._TV_locs[TV][0], self._TV_locs[TV][1], self._TV_locs[TV][2])
+
+                tv_transf = carla.Transform(location = tv_locat)
+                #pdb.set_trace() #check location
+                wp_tv = self._map.get_waypoint(tv_locat, project_to_road=True,
                                         lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
 
-                
+                print('TV:', TV, 'ev lane: ', wp_ev.lane_id, 'tv_lane_id: ', wp_tv.lane_id)
+                #print('ev:', wp_ev, 'TV:', wp_tv)
                 #signs flipped because switch from casadi to scipy
                 # qz = np.array([-Delta * closest_front_vehicle[3], 0, 1,(-closest_front_vehicle[4] + min_dist + car_dim['length'])]) #lane change case21121
 
@@ -775,7 +832,8 @@ class VehicleCurvMPC(object):
                     lane_diff = wp_ev.lane_id - wp_tv.lane_id
                     #print("distance:", euclidean_distance(self._vehicle.get_location(),wp_tv.transform.location))
                     #### because there is no lane zero
-                    if wp_ev.lane_id == 1 & wp_tv.lane_id == -1:
+                    #pdb.set_trace() #there seems to be an issue with lane_id when coming from behind
+                    if wp_ev.lane_id == 1 & wp_tv.lane_id == -1 and "left constraint" not in constraints:
                         for k in range(N):
                             qt_stay[current_tv_idx][k][0] = 0
                             qt_stay[current_tv_idx][k][1] = -1
@@ -784,6 +842,8 @@ class VehicleCurvMPC(object):
                              #case 225
                             
                         print("case 225 added")
+                        
+                        constraints.append("left constraint")
                         #minus1_lane.append(current_tv_idx)
 
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
@@ -792,13 +852,15 @@ class VehicleCurvMPC(object):
 
                         
                         
-                    elif wp_ev.lane_id == -1 & wp_tv.lane_id == 1:
+                    elif wp_ev.lane_id == -1 & wp_tv.lane_id == 1 and "right constraint" not in constraints:
                         for k in range(N):
                             qt_stay[current_tv_idx][k][0] = 0
                             qt_stay[current_tv_idx][k][1] = 1
                             qt_stay[current_tv_idx][k][2] = 0
                             qt_stay[current_tv_idx][k][3] = -0.5*tv_states[k][2]#case 220
                         print("case 220 added")
+                        
+                        constraints.append("right unq constraint")
 
                         #plus1_lane.append(current_tv_idx)
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
@@ -807,7 +869,7 @@ class VehicleCurvMPC(object):
                     ####
                             
                     
-                    if lane_diff == 1:
+                    if lane_diff == 1 and "left constraint" not in constraints:
                         #minus1_lane.append(current_tv_idx)
                         for k in range(N):
                             qt_stay[current_tv_idx][k][0] = 0
@@ -816,11 +878,12 @@ class VehicleCurvMPC(object):
                             qt_stay[current_tv_idx][k][3] = 0.5*tv_states[k][2]
                              #case 225
                         print("case 225 added")
+                        constraints.append("left constraint")
                         #check if either lanes have tvs that are just behind the ev (for lane changing)
                         if x0[1] >= -2*car_dim['length']:
                             left_lane_free = False
                             print("updated left lane")
-                    elif lane_diff == -1:
+                    elif lane_diff == -1 and "right constraint" not in constraints:
                         #plus1_lane.append(current_tv_idx)
                         for k in range(N):
                             qt_stay[current_tv_idx][k][0] = 0
@@ -832,6 +895,7 @@ class VehicleCurvMPC(object):
                         if x0[1] >= -2*car_dim['length']:
                             right_lane_free = False
                             print("updated right lane")
+                        constraints.append("right constraint")
 
 
 
@@ -843,15 +907,23 @@ class VehicleCurvMPC(object):
                             qt_stay[current_tv_idx][k][3] = tv_states[k][0] - min_dist - car_dim['length']  #case 210  #xi
                             
                         print("case210 added")
+                        constraints.append("front constraint")
+                        #pdb.set_trace()
+                        # if closest_front_vehicle != None:
+                        #     print("invalid index WHY", closest_front_vehicle[0], tv_states[0])
                         if tv_states[0][0] > 0:
-                            car_ahead = current_tv_idx # 
+                            car_ahead = current_tv_idx # this is fine because it is only one car in front
                             print("car ahead added")
-                        if not closest_front_vehicle:#check if not defined or if this tv is closer than previously tv that set this bound
-                            closest_front_vehicle = x0s
-                            print("updated closest car")
-                        elif closest_front_vehicle[0] > tv_states[0][0]:
-                            closest_front_vehicle = tv_states
-                            print("updated closest car")
+
+                            
+                        # if closest_front_vehicle == None:#check if not defined or if this tv is closer than previously tv that set this bound
+                        #     closest_front_vehicle = x0s
+                        #     print("not none", closest_front_vehicle)
+                        #     print("updated closest car")
+                        
+                        # elif closest_front_vehicle[0] > tv_states[0][0]:
+                        #     closest_front_vehicle = tv_states[0]
+                        #     print("updated closest car")
 
                 current_tv_idx += 1
 
@@ -877,12 +949,12 @@ class VehicleCurvMPC(object):
 
 
             #print("ev yaw", ev_state[6])
-            print("lane stay case added")
+            #print("lane stay case added")
             #pdb.set_trace()
             if car_ahead != None:
                 print("CAR AHEAD!! BEGIN CHANGE LANES") #immediately wehn condition is applied it steers out of control. I think min dist is too high
 
-                #print("tv to ev", closest_front_vehicle[4])
+                print("EV (xi, eta):", ev_state[4:6])
                 
                 if right_lane_free == True or left_lane_free == True: #either lanes free to use to overtake?
                     if right_lane_free == True:
@@ -891,23 +963,25 @@ class VehicleCurvMPC(object):
                         #case21121 = np.array([0,-1, (closest_front_vehicle[4] - 2 * car_dim['length'])/(2.5* car_dim['width'] + closest_front_vehicle[5] - ev_state[5]), (ev_state[5]-car_dim['width'])])
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  -(all_tv_states[car_ahead][s][0] - ev_state[4]- car_dim['length'] - min_dist) / (1* car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  -2.2*(all_tv_states[car_ahead][s][0] - ev_state[4]- car_dim['length']) / (car_dim['width']) #2.3 as overall worked well
                             qt_change[car_ahead][s][2] =  -1  #x[4] #xi , eta, eta
-                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2 * car_dim['length'] #const
+                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 2.5* car_dim['length'] #const #coeff og 3.2
                         #cond_array = np.array([e.all() for e in cond_array if e.all() not in minus1_lane]) 
                         #pdb.set_trace()
                         # cond_clean(cineq, plus1_lane)
                         # print("removed right lane constraints")
+                        constraints.append("right change constraint")
                     elif left_lane_free == True:
                         print("left lane free")
 
                         for s in range(N):
                             qt_change[car_ahead][s][0] =  0 #kap
-                            qt_change[car_ahead][s][1] =  (all_tv_states[car_ahead][s][0] - ev_state[4] - car_dim['length'] - min_dist) / (1*car_dim['width']) #x[5]
+                            qt_change[car_ahead][s][1] =  2.5*(all_tv_states[car_ahead][s][0] - ev_state[4] - car_dim['length']) / (1*car_dim['width']) #x[5]
                             qt_change[car_ahead][s][2] =  -1 
-                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 3.2* car_dim['length']#const eta
+                            qt_change[car_ahead][s][3] =  all_tv_states[car_ahead][s][0] - 2.5* car_dim['length']#const eta
                         #print("tv_state", all_tv_states[car_ahead][0])
-                        #print("qt_ change", qt_change)
+                        constraints.append("left change constraint")
+                    print("qt_ change", qt_change)
                     #the problem is being able to tell which array of lane cond to remove
                         # cond_clean(cineq, minus1_lane)
                         # print("removed left lane constraints")
@@ -916,13 +990,15 @@ class VehicleCurvMPC(object):
                     # cond_clean(cineq, car_ahead)
                     # print("removed front constraints")
                     print("returned qt_change")
+                    print(constraints)
                     return qt_change
-        print("returned qt_stay")
-
+        print("returned qt_stay", qt_stay)
+        print(constraints)
         #print("--- %s seconds ---" % (time.time() - start_time))
 
         #pdb.set_trace()
         return qt_stay # return constraints in array form (instead of list)
+    # def u_retrieve():
     # def u_retrieve():
     #     x0 = pdb.set_trace
 
