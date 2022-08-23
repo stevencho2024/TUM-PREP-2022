@@ -3,9 +3,11 @@
 """
 from collections import deque
 from enum import Enum
+from multiprocessing.dummy import Array
 import random
 import numpy as np
 import math
+import pdb
 
 try:
     import carla
@@ -120,6 +122,9 @@ def calculate_step_distance(vehicle_speed, dt=1.0 / 30.0, factor=1.5):
     :param factor Multiplication factor for the traveld distance between two timestamps
     :return: sampling_radius based on prediction frequency and vehicle speed.
     """
+    #print("speed", vehicle_speed)
+    #print("dt",  dt )
+    #print("factor", factor / 3.6)
     return vehicle_speed * dt * factor / 3.6
 
 
@@ -323,7 +328,7 @@ def get_wp_angle(wp1: carla.Waypoint, wp2: carla.Waypoint):
 
     return wp_angle
 
-def get_distance2wp(vehicle_transform: carla.Transform, wp1: carla.Waypoint, wp2: carla.Waypoint):
+def get_distance2wp(vehicle_transform, wp1: carla.Waypoint, wp2: carla.Waypoint):
     """
     Calculating a norm vector form the vehicle position to the reference line (from wp1 to wp2) and
     returning the length from this vector.
@@ -334,7 +339,9 @@ def get_distance2wp(vehicle_transform: carla.Transform, wp1: carla.Waypoint, wp2
     :return: Returning distance of the vehicle to the reference line (from wp1 to wp2)
     """
     # Flipping x-axis of the vehicle location
+    
     vehicle_loc = vehicle_transform.location
+    #pdb.set_trace()
     ego_vehicle_loc = carla.Location(x=-1 * vehicle_loc.x, y=vehicle_loc.y, z=0)
 
 
@@ -344,10 +351,10 @@ def get_distance2wp(vehicle_transform: carla.Transform, wp1: carla.Waypoint, wp2
     norm = np.linalg.norm(wp_vector) + np.finfo(float).eps
     cross = np.cross(wp_vector, xy_vector) + np.finfo(float).eps
 
-    return np.linalg.norm(cross/norm) + np.finfo(float).eps
+    return np.linalg.norm(cross/norm) + np.finfo(float).eps #normal distance from reference path of tv to ev (not refrence path of ev)
 
 
-def get_angle2wp_line(vehicle_transform: carla.Transform, wp1: carla.Waypoint, wp2: carla.Waypoint):
+def get_angle2wp_line(vehicle_transform, wp1: carla.Waypoint, wp2: carla.Waypoint):
     """
     Calculating a norm vector form the vehicle position to the reference line (from wp1 to wp2) and
     returning the length from this vector.
@@ -355,9 +362,10 @@ def get_angle2wp_line(vehicle_transform: carla.Transform, wp1: carla.Waypoint, w
     :param vehicle_transform: carla.Transform object of the location of the ego-vehicle in world
     :param wp1: Carla Waypoint object 1
     :param wp2: Carla Waypoint object 2
-    :return: Returning distance of the vehicle to the reference line (from wp1 to wp2)
+    :return: Returning angle between 
     """
     # Flipping x-axis of the vehicle location
+    
     vehicle_loc = vehicle_transform.location
     ego_vehicle_loc = carla.Location(x=-1 * vehicle_loc.x, y=vehicle_loc.y, z=0)
 
@@ -365,7 +373,7 @@ def get_angle2wp_line(vehicle_transform: carla.Transform, wp1: carla.Waypoint, w
     wp_vector = get_wp_vector(wp2, wp1)  # wp2 - wp1
     xy_vector = get_wp_vector(ego_vehicle_loc, wp2) # vehicle.loc - wp2
 
-    sign = np.sign(xy_vector[1] * wp_vector[0] - xy_vector[0] * wp_vector[1])
+    sign = np.sign(xy_vector[1] * wp_vector[0] - xy_vector[0] * wp_vector[1]) #pos or neg base on sign of the expression inside
 
 
     norm_wp = np.linalg.norm(wp_vector) + np.finfo(float).eps
@@ -579,9 +587,50 @@ def psi2NMPC(psi):
     """
     return wrap2pi(np.pi - psi)
 
-def get_xi_TV(tv_transform: carla.Transform, wpList: [carla.Waypoint], distance_wp: float, map, ev_wp_idx=5):
+def get_xi_TV(tv_transform, wpList: carla.Waypoint, distance_wp: float, map, ev_wp_idx=5):
     """
-    Retrieving the current xi distance from a TV to the EV of the MPC system.
+    Retrieving the current xpof the MPC system.
+    The Distance is approximated by determine the waypoints between the current WP of EV (W_C)
+     and  nearest waypoint to the TV of the wpList W_nTV.
+    Addionally the distance of  W_nTV and a new drawn nearest WP for TV is added by
+        simple taking the euclidean distance .
+    This is needed because the distance of the WPs in the wpList is ~2m.
+
+    :param tv_transform: carla.Transform element of TV location + orientation
+    :param wpList: list of carla.Waypoint for example the ones used
+        to determine the road curvature kappa
+    :return: XI in realtion to EV
+    """
+
+    # init wp index points to the nearest WP of TV in wpList.
+    wp_idx = 0
+    
+    # Getting the nearest the wp to the target vehicle
+    #tv_loc = get_localization_from_vehicle_transform(tv_transform) #gets xyz of car
+    tv_wp = map.get_waypoint(tv_transform.location,project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+    #pdb.set_trace()
+    # Determine the last WP of wp_list which is behind tv_wp
+    for i, wp in enumerate(wpList):
+        if not is_within_distance_ahead(wp[0].transform, tv_wp.transform, distance_wp):
+            continue
+        
+        wp_idx = i - 1
+        
+    if wp_idx == -1: #to fix the error when wp_idx = -1
+        wp_idx = 0
+
+
+    #if wp_idx - ev_wp_idx >= 0:
+    euc_dis = euclidean_distance(wpList[wp_idx][0].transform.location, tv_wp.transform.location)
+    #pdb.set_trace()
+    return distance_wp * (wp_idx - ev_wp_idx) + euc_dis
+    
+    # if wp_idx - ev_wp_idx < 0:
+    #     return distance_wp * (wp_idx - ev_wp_idx) - euclidean_distance(wpList[wp_idx][0].transform.location, tv_wp.transform.location)
+
+def get_xi_TV_xyz(location, wpList: carla.Waypoint, distance_wp: float, map, ev_wp_idx=5):
+    """
+    Retrieving the current xpof the MPC system.
     The Distance is approximated by determine the waypoints between the current WP of EV (W_C)
      and  nearest waypoint to the TV of the wpList W_nTV.
     Addionally the distance of  W_nTV and a new drawn nearest WP for TV is added by
@@ -598,22 +647,23 @@ def get_xi_TV(tv_transform: carla.Transform, wpList: [carla.Waypoint], distance_
     wp_idx = 0
 
     # Getting the nearest the wp to the target vehicle
-    tv_loc = get_localization_from_vehicle_transform(tv_transform)
-    tv_wp = map.get_waypoint(tv_transform.location,project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+    #tv_loc = get_localization_from_vehicle_transform(tv_transform) #gets xyz of car
+    tv_wp = map.get_waypoint(location,project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
 
     # Determine the last WP of wp_list which is behind tv_wp
     for i, wp in enumerate(wpList):
         if not is_within_distance_ahead(wp[0].transform, tv_wp.transform, distance_wp):
             continue
-
+        
         wp_idx = i - 1
+        
+    if wp_idx == -1: #to fix the error when wp_idx = -1
+        wp_idx = 0
 
-    # todo: add handling of tv behind EV
-    # wpList[5] is the current wp of EV
     return distance_wp * (wp_idx - ev_wp_idx) + euclidean_distance(wpList[wp_idx][0].transform.location, tv_wp.transform.location)
+ 
 
-
-def xy2frenet_wp(vehicle: carla.Vehicle, map, wpList_kappa: [carla.Waypoint], distance_wp: float):
+def xy2frenet_wp(vehicle: carla.Vehicle, map, wpList_kappa: carla.Waypoint, distance_wp: float):
     """
     Transforming the xy position of any vehicle in the scene into frenet state representation [xi, eta, phi]
     :param vehicle: carla.Vehicle has the current xy state included
@@ -629,27 +679,72 @@ def xy2frenet_wp(vehicle: carla.Vehicle, map, wpList_kappa: [carla.Waypoint], di
     wp_next = wp_current.next(2)[0]
 
     # Calculating Xi
-    xi = get_xi_TV(vehicle.get_transform(), wpList_kappa, distance_wp, map)
+    xi = get_xi_TV(vehicle.get_transform(), wpList_kappa, distance_wp, map) #distance from
 
     # Determine ETA
-    angle_xy = get_angle2wp_line(vehicle_transform, wp_current, wp_next)
+    angle_xy = get_angle2wp_line(vehicle_transform, wp_current, wp_next) #angle between vehicle and waypoint path
+    #print("I AM HERE")
     eta = np.sign(angle_xy) * get_distance2wp(vehicle_transform, wp_current, wp_next)
 
     # if EV and target are not on the same line add lane width to eta
     if wp_current.lane_id != wpList_kappa[5][0].lane_id:
         diff_lane = abs(wpList_kappa[5][0].lane_id) - abs(wp_current.lane_id)
 
-        eta += np.sign(diff_lane) * abs(diff_lane) * wp_current.lane_width
+        eta += np.sign(diff_lane) * abs(diff_lane) * wp_current.lane_width #differences in reference line for tv and ev
 
     # Determine Theta
-    angle_wp = get_wp_angle(wp_current, wp_next)
+    angle_wp = get_wp_angle(wp_current, wp_next) #gets angle of waypoints wrt x axis
     vehicle_heading = wrap2pi(np.pi - np.deg2rad(round(vehicle.get_transform().rotation.yaw, 3)))
-    theta = wrap2pi(vehicle_heading - angle_wp)
+    theta = wrap2pi(vehicle_heading - angle_wp) #angle offset of car from trajectory
 
 
 
-    return np.array([vehicle_loc.x, vehicle_loc.y, vehicle_heading, get_speed(vehicle) / 3.6,xi, eta, theta,])
+    return np.array([vehicle_loc.x, vehicle_loc.y, vehicle_heading, get_speed(vehicle) / 3.6,xi, eta, theta,]) #x,y, , speed, xi,eta,theta
 
+def xy2frenet_pnt_specific(vehicle, last_xi, time_stp ,tv_location, map, wpList_kappa: carla.Waypoint, distance_wp: float):
+    """
+    Transforming the xy position of any vehicle in the scene into frenet state representation [xi, eta, phi]
+    :param vehicle: carla.Vehicle has the current xy state included
+    :param wpList_kappa: list of wp.Waypoint used to determine the road curvature value of the current scene
+    :param distance_wp: distance between two wp in wpList
+    :param idx: define exact waypoint to be converted
+    :return: np.array([xi, eta, phi])
+    """
+    
+    tv_loc = carla.Location(x= tv_location[0], y= tv_location[1], z= tv_location[2])
+    tv_trans = carla.Transform(location= tv_loc)
+    #pdb.set_trace() #check location
+    #getting waypoints
+    wp_current = map.get_waypoint(tv_loc, project_to_road=True, lane_type=(carla.LaneType.Driving | carla.LaneType.Sidewalk))
+    wp_next = wp_current.next(2)[0]
+
+    # Calculating Xi
+    xi = get_xi_TV(tv_trans, wpList_kappa, distance_wp, map) #distance from
+    #print('xi', xi)
+    # Determine ETA
+    angle_xy = get_angle2wp_line(tv_trans, wp_current, wp_next) 
+    eta = np.sign(angle_xy) * get_distance2wp(tv_trans, wp_current, wp_next)
+
+    # if EV and target are not on the same line add lane width to eta
+    if wp_current.lane_id != wpList_kappa[5][0].lane_id:
+        diff_lane = abs(wpList_kappa[5][0].lane_id) - abs(wp_current.lane_id)
+
+        eta += np.sign(diff_lane) * abs(diff_lane) * wp_current.lane_width #differences in reference line for tv and ev
+    # if eta < -4:
+    #     pdb.set_trace()
+    #print("eta", eta)
+    #calculate velocity 
+    a = np.sqrt(vehicle.get_acceleration().x**2 + vehicle.get_acceleration().y**2)
+
+
+    t_delt = time_stp
+    if last_xi == 0:
+        last_xi = xi
+    
+    mag_vel = np.sqrt(vehicle.get_velocity().x**2 + vehicle.get_velocity().y**2)
+    tv_velocity = (xi - last_xi) + mag_vel - 0.5*a*t_delt
+    #pdb.set_trace
+    return [xi, tv_velocity, eta, 0] #speed, xi, eta
 
 def predict_frenet_kinVehMod(x0: np.array, control: np.array, kappa: float,  delta: float=0.2):
     """
