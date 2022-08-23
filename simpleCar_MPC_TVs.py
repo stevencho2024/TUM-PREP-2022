@@ -13,6 +13,7 @@ import time
 from termcolor import colored
 
 import pandas as pd
+#from mayavi import mlab
 
 try:
     # sys.path.append(glob.glob('/opt/carla-simulator/PythonAPI/carla/dist/carla-*%d.%d-%s.egg' % (
@@ -43,7 +44,7 @@ from mpcCARLA.control_agent import *
 from agents.tools.misc import *
 from mpcCARLA.visualization_tools import plot_frenet_states
 from mpcCARLA.local_planner_modified import *
-
+#from mayavi import mlab
 
 class CarlaSyncMode(object):
     """
@@ -177,7 +178,7 @@ def main():
         # # ego vehicle spawn point OG
         # "EV": carla.Location(x=-13.298, y=-187, z=0),
         # ego vehicle spawn point
-        "EV": carla.Location(x=-13, y=-145, z=0), #works
+        "EV": carla.Location(x=-13, y=-155, z=0), #works
 
         ## same lane candidate (in front of EV) OG
         "TV1": carla.Location(x=-13.1351, y=-136.132, z=0.0),
@@ -341,12 +342,13 @@ def main():
         lidar_bp = blueprint_library.find('sensor.lidar.ray_cast')
         lidar_bp.set_attribute('rotation_frequency', '30')
         lidar_bp.set_attribute('range', '30') #meters
-        lidar_bp.set_attribute('lower_fov', '-22.5') #meters
-        lidar_bp.set_attribute('upper_fov', '0') #meters
-        #lidar_bp.set_attribute('points_per_second', '20000') #meters
+        #lidar_bp.set_attribute('lower_fov', '-22.5') #meters
+        #lidar_bp.set_attribute('upper_fov', '0') #meters
+        lidar_bp.set_attribute('points_per_second', '65000') #meters
         #lidar_bp.set_attribute('channels', '20') #meters
         lidar_transform = carla.Transform(carla.Location(x=0.4, z=1.6))
         lidar = world.spawn_actor(lidar_bp, lidar_transform, attach_to = ego_vehicle)
+        
 
         actor_list.append(lidar)
 
@@ -401,14 +403,13 @@ def main():
                 clock.tick()
                 draw_image(display, image_rgb)
                 pygame.display.flip()
-
-
-
+                #display lidar stuff
+                lidar_data.save_to_disk('tutorial/new_lidar_output/%.6d.ply' % lidar_data.frame)
                 # printing the carla simulation time
                 carla_time = time.time() - frame_start
 
                 # get local planner control
-                veh_control, frenet_data, kappa_data = agent.run_step(lidar_data, timestep_count, log=True, print=printer) #printer stops all repetitive printing , debug (in control agent stops clearing & more printing)
+                veh_control, frenet_data, kappa_data = agent.run_step(lidar_data, timestep_count, log=True, printer=printer) #printer stops all repetitive printing , debug (in control agent stops clearing & more printing)
 
                 veh_control.manual_gear_shift = False
 
